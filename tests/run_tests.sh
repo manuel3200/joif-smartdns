@@ -754,6 +754,14 @@ assert_contains "${JOIF_DOMAINS_DIR}/99-custom.list" "mi-custom-intacto.com.ar" 
 assert_contains "$JOIF_LICENSES_DB" "144.22.167.150/32|Nodo Brasil 01|" "updater preserva intacto licenses.db"
 [[ -x "${UPD_INSTALL}/core/updater.sh" ]] && pass "updater despliega scripts ejecutables en JOIF_INSTALL_DIR sin requerir .git" || fail "updater no desplego scripts"
 
+# Regresion SIGPIPE/pipefail: re-ejecutar updater NO debe duplicar dominios existentes en el .list
+mp_before_upd="$(grep -Fxc "mercadopago.com.ar" "${JOIF_DOMAINS_DIR}/01-fintech-bancos.list")"
+printf 'mercadopago.com.ar\n' >> "${JOIF_DOMAINS_DIR}/01-fintech-bancos.list"
+JOIF_INSTALL_DIR="$UPD_INSTALL" updater_run --source-dir "$UPD_SRC" >/dev/null
+mp_after_upd="$(grep -Fxc "mercadopago.com.ar" "${JOIF_DOMAINS_DIR}/01-fintech-bancos.list")"
+assert_eq "1" "$mp_before_upd" "updater no duplica dominios existentes bajo pipefail"
+assert_eq "1" "$mp_after_upd" "updater deduplica automaticamente duplicados previos en listas base"
+
 # ------------------------------------------------------------------------------
 # 8. Fase 2: UI compacta (UTF-8 / ASCII <=74 cols) y buscador/probador de dominios
 # ------------------------------------------------------------------------------

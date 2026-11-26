@@ -9,20 +9,53 @@ source "${SCRIPT_DIR}/domains.sh"
 # shellcheck source=core/maintenance.sh
 source "${SCRIPT_DIR}/maintenance.sh"
 
-# Mezcla dominios nuevos de una lista base upstream sin duplicar ni reactivar categorias pausadas
+# Instala un archivo reemplazando el inodo atomicamente (mv -f) para no corromper scripts en ejecucion
+_updater_install_file() {
+    local src="$1"
+    local dst="$2"
+    local mode="${3:-644}"
+    mkdir -p "$(dirname "$dst")"
+    local tmp
+    tmp="$(mktemp "$(dirname "$dst")/.upd.XXXXXX")"
+    cp -f "$src" "$tmp"
+    chmod "$mode" "$tmp"
+    mv -f "$tmp" "$dst"
+}
+
+# Deduplica lineas repetidas de dominio (preservando comentarios) y mezcla dominios nuevos sin pipes grep -q
 _updater_merge_list_file() {
     local upstream_file="$1"
     local target_file="$2"
-    local added=0 dom
 
+    declare -A seen=()
+    local tmp line norm
+    tmp="$(mktemp "$(dirname "$target_file")/.listmerge.XXXXXX")"
+
+    # 1) Conservar archivo actual eliminando duplicados exactos (repara duplicados previos si existian)
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line//$'\r'/}"
+        if norm="$(joif_normalize_domain "$line" 2>/dev/null)"; then
+            if [[ -n "${seen[$norm]:-}" ]]; then
+                continue
+            fi
+            seen["$norm"]=1
+        fi
+        printf '%s\n' "$line" >> "$tmp"
+    done < "$target_file"
+
+    # 2) Agregar solo dominios nuevos presentes en upstream
+    local added=0 dom
     while IFS= read -r dom; do
         [[ -z "$dom" ]] && continue
-        if ! domains_parse_file "$target_file" 2>/dev/null | grep -Fxq "$dom"; then
-            printf '%s\n' "$dom" >> "$target_file"
+        if [[ -z "${seen[$dom]:-}" ]]; then
+            seen["$dom"]=1
+            printf '%s\n' "$dom" >> "$tmp"
             added=$((added + 1))
         fi
     done < <(domains_parse_file "$upstream_file" 2>/dev/null)
 
+    chmod 644 "$tmp"
+    mv -f "$tmp" "$target_file"
     printf '%s\n' "$added"
 }
 
@@ -117,31 +150,28 @@ updater_run() {
     # Backup automatico de seguridad antes de actualizar (~3 KB)
     maintenance_backup >/dev/null || true
 
-    # Desplegar scripts actualizados en JOIF_INSTALL_DIR sin tocar config.env ni licenses.db
+    # Desplegar scripts actualizados con reemplazo atomico de inodo (nunca corrompe menu.sh en ejecucion)
     mkdir -p "${JOIF_INSTALL_DIR}/core" "${JOIF_INSTALL_DIR}/domains.d" "${JOIF_INSTALL_DIR}/systemd" "${JOIF_INSTALL_DIR}/tools"
-    cp -f "${work_dir}/install.sh"   "${JOIF_INSTALL_DIR}/install.sh"
-    cp -f "${work_dir}/uninstall.sh" "${JOIF_INSTALL_DIR}/uninstall.sh"
-    cp -f "${work_dir}/menu.sh"      "${JOIF_INSTALL_DIR}/menu.sh"
-    cp -f "${work_dir}/core/"*.sh    "${JOIF_INSTALL_DIR}/core/"
-    cp -f "${work_dir}/domains.d/"*.list "${JOIF_INSTALL_DIR}/domains.d/"
-    cp -f "${work_dir}/systemd/"*    "${JOIF_INSTALL_DIR}/systemd/"
-    if [[ -d "${work_dir}/tools" ]]; then
-        shopt -s nullglob
-        local t
-        for t in "${work_dir}/tools/"*.sh; do
-            cp -f "$t" "${JOIF_INSTALL_DIR}/tools/"
-        done
-        shopt -u nullglob
-    fi
+    _updater_install_file "${work_dir}/install.sh"   "${JOIF_INSTALL_DIR}/install.sh"   755
+    _updater_install_file "${work_dir}/uninstall.sh" "${JOIF_INSTALL_DIR}/uninstall.sh" 755
+    _updater_install_file "${work_dir}/menu.sh"      "${JOIF_INSTALL_DIR}/menu.sh"      755
 
-    chmod 755 "${JOIF_INSTALL_DIR}/install.sh" \
-              "${JOIF_INSTALL_DIR}/uninstall.sh" \
-              "${JOIF_INSTALL_DIR}/menu.sh" \
-              "${JOIF_INSTALL_DIR}/core/"*.sh
+    local f
     shopt -s nullglob
-    for t in "${JOIF_INSTALL_DIR}/tools/"*.sh; do
-        chmod 755 "$t"
+    for f in "${work_dir}/core/"*.sh; do
+        _updater_install_file "$f" "${JOIF_INSTALL_DIR}/core/$(basename "$f")" 755
     done
+    for f in "${work_dir}/domains.d/"*.list; do
+        _updater_install_file "$f" "${JOIF_INSTALL_DIR}/domains.d/$(basename "$f")" 644
+    done
+    for f in "${work_dir}/systemd/"*; do
+        [[ -f "$f" ]] && _updater_install_file "$f" "${JOIF_INSTALL_DIR}/systemd/$(basename "$f")" 644
+    done
+    if [[ -d "${work_dir}/tools" ]]; then
+        for f in "${work_dir}/tools/"*.sh; do
+            _updater_install_file "$f" "${JOIF_INSTALL_DIR}/tools/$(basename "$f")" 755
+        done
+    fi
     shopt -u nullglob
 
     # Merge inteligente de listas base (respeta categorias pausadas y nunca toca 99-custom.list)

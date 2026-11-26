@@ -161,7 +161,7 @@ domains_custom_add() {
     local custom
     custom="$(domains_custom_file)"
 
-    if domains_parse_file "$custom" 2>/dev/null | grep -Fxq "$norm"; then
+    if domains_parse_file "$custom" 2>/dev/null | grep -Fx "$norm" >/dev/null; then
         log_warn "El dominio '${norm}' ya existe en 99-custom.list."
         return 0
     fi

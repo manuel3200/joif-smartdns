@@ -15,7 +15,7 @@ _firewall_ipset_has_counters() {
     local header
     header="$("$JOIF_IPSET_BIN" list -t "$JOIF_IPSET_NAME" 2>/dev/null || true)"
     [[ -z "$header" ]] && return 2   # no existe aun
-    if printf '%s\n' "$header" | grep -q 'counters'; then
+    if [[ "$header" == *counters* ]]; then
         return 0
     fi
     return 1

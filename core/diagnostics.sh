@@ -135,7 +135,7 @@ diagnostics_run() {
     # 6. Pruebas DNS en vivo contra 127.0.0.1
     printf '\n%b[6] Pruebas DNS Locales en Vivo (@127.0.0.1)%b\n' "$C_BOLD" "$C_RESET"
     local test_domain="mercadopago.com.ar"
-    if ! domains_collect_active | grep -Fxq "$test_domain"; then
+    if ! domains_collect_active | grep -Fx "$test_domain" >/dev/null; then
         test_domain="$(domains_collect_active | head -n1 || true)"
     fi
 
@@ -191,10 +191,10 @@ diagnostics_run() {
         fi
 
         # Prueba negativa anti-abuso (dominio fuera de lista debe ser rechazado)
-        if ! domains_collect_active | grep -Fxq "example.com"; then
+        if ! domains_collect_active | grep -Fx "example.com" >/dev/null; then
             local deny_out
             deny_out="$(timeout 4 openssl s_client -connect 127.0.0.1:443 -servername "example.com" </dev/null 2>&1 || true)"
-            if ! printf '%s\n' "$deny_out" | grep -q '^subject='; then
+            if ! printf '%s\n' "$deny_out" | grep '^subject=' >/dev/null; then
                 _diag_badge 0 "Anti-abuso SNI (443): dominio no autorizado 'example.com' RECHAZADO correctamente"
             else
                 _diag_badge 1 "ALERTA SEGURIDAD: 'example.com' paso por el SNI proxy sin estar en la allowlist"

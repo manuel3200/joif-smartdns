@@ -499,7 +499,11 @@ menu_maintenance() {
         read -r -p "Elige una opcion [0-8]: " opt || return 0
         case "$opt" in
             1)
-                joif_with_lock updater_run || true
+                if joif_with_lock updater_run; then
+                    log_info "Recargando panel con la nueva version..."
+                    ui_pause
+                    exec "$SOURCE_PATH"
+                fi
                 ui_pause
                 ;;
             2)
