@@ -67,6 +67,8 @@ joif-smartdns/
 │   ├── joif-smartdns-firewall.service
 │   ├── joif-smartdns-expire.service
 │   └── joif-smartdns-expire.timer
+├── tools/
+│   └── acceso-root.sh               # Utilidad opcional para habilitar acceso SSH root con clave
 └── tests/
     └── run_tests.sh                 # Suite de pruebas automatizadas locales
 ```
@@ -125,6 +127,14 @@ sudo smartdns domains remove midominio.com.ar
 
 # Diagnóstico completo en vivo
 sudo smartdns status
+```
+
+## Utilidad opcional: habilitar acceso SSH `root` con clave
+
+Si tu VPS viene solo con usuario sin `root` (ej. `ubuntu` o `clientXXXX` con `cloud-init`), podés habilitar el acceso `root` por contraseña de forma segura (valida con `sshd -t` antes de reiniciar SSH):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/manuel3200/joif-smartdns/main/tools/acceso-root.sh -o acceso-root.sh && chmod +x acceso-root.sh && sudo ./acceso-root.sh
 ```
 
 ## Desinstalación limpia

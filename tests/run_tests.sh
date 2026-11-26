@@ -501,9 +501,92 @@ assert_contains "$FW_LOG" "iptables -X JOIF_SMARTDNS" "Teardown elimina cadena J
 assert_contains "$FW_LOG" "ipset destroy joif_smartdns_allow" "Teardown destruye ipset joif_smartdns_allow"
 assert_not_contains "$FW_LOG" "--dport 22" "Teardown NUNCA toca el puerto SSH (22)"
 
-# Probar ayuda CLI de menu.sh e install.sh
+# Probar ayuda CLI de menu.sh, install.sh y tools/acceso-root.sh
 bash "${REPO_DIR}/menu.sh" --help >/dev/null && pass "menu.sh --help ejecuta correctamente" || fail "menu.sh --help fallo"
 bash "${REPO_DIR}/install.sh" --help >/dev/null && pass "install.sh --help ejecuta correctamente" || fail "install.sh --help fallo"
+bash "${REPO_DIR}/tools/acceso-root.sh" --help >/dev/null && pass "tools/acceso-root.sh --help ejecuta correctamente" || fail "acceso-root.sh --help fallo"
+
+# ------------------------------------------------------------------------------
+# 6. Utilidad tools/acceso-root.sh (prioridad cloud-init, salida y rollback)
+# ------------------------------------------------------------------------------
+printf '\n=== [6] Utilidad tools/acceso-root.sh ===\n'
+
+SSH_TEST_DIR="${TEST_ROOT}/etc/ssh"
+mkdir -p "${SSH_TEST_DIR}/sshd_config.d"
+cat > "${SSH_TEST_DIR}/sshd_config" <<'EOF'
+Include /etc/ssh/sshd_config.d/*.conf
+Port 22
+EOF
+cat > "${SSH_TEST_DIR}/sshd_config.d/50-cloud-init.conf" <<'EOF'
+PasswordAuthentication no
+EOF
+
+CHPASSWD_LOG="${TEST_ROOT}/chpasswd.log"
+cat > "${MOCK_BIN}/chpasswd" <<EOF
+#!/usr/bin/env bash
+cat > "${CHPASSWD_LOG}"
+EOF
+chmod +x "${MOCK_BIN}/chpasswd"
+
+cat > "${MOCK_BIN}/passwd" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/passwd"
+
+cat > "${MOCK_BIN}/sshd" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-T" ]]; then
+    echo "port 22"
+    exit 0
+fi
+if [[ "${MOCK_SSHD_FAIL:-0}" == "1" ]]; then
+    echo "sshd: syntax error (simulated)" >&2
+    exit 1
+fi
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/sshd"
+
+ROOT_OUT="${TEST_ROOT}/acceso_root.out"
+JOIF_ALLOW_NONROOT_TEST=1 \
+JOIF_SSHD_CONF="${SSH_TEST_DIR}/sshd_config" \
+JOIF_SSHD_DROPIN_DIR="${SSH_TEST_DIR}/sshd_config.d" \
+JOIF_SSHD_DROPIN_FILE="${SSH_TEST_DIR}/sshd_config.d/00-joif-root.conf" \
+JOIF_SSHD_BIN="${MOCK_BIN}/sshd" \
+JOIF_CHPASSWD_BIN="${MOCK_BIN}/chpasswd" \
+JOIF_PASSWD_BIN="${MOCK_BIN}/passwd" \
+JOIF_SKIP_SSH_RESTART=1 \
+JOIF_ROOT_PASSWORD_INPUT="ClaveSegura2026" \
+JOIF_PUBLIC_IP_OVERRIDE="203.0.113.25" \
+bash "${REPO_DIR}/tools/acceso-root.sh" > "$ROOT_OUT"
+
+assert_contains "${SSH_TEST_DIR}/sshd_config.d/00-joif-root.conf" "PermitRootLogin yes" "acceso-root crea drop-in 00-joif-root.conf con PermitRootLogin yes"
+assert_contains "${SSH_TEST_DIR}/sshd_config.d/00-joif-root.conf" "PasswordAuthentication yes" "acceso-root habilita PasswordAuthentication yes sobre cloud-init"
+assert_contains "$CHPASSWD_LOG" "root:ClaveSegura2026" "acceso-root envia root:<clave> a chpasswd"
+assert_contains "$ROOT_OUT" "Usuario: root   Clave: ClaveSegura2026   IP: 203.0.113.25" "acceso-root imprime tarjeta con Usuario, Clave e IP"
+
+# Probar rollback de acceso-root si sshd -t falla
+rm -f "${SSH_TEST_DIR}/sshd_config.d/00-joif-root.conf"
+if MOCK_SSHD_FAIL=1 \
+   JOIF_ALLOW_NONROOT_TEST=1 \
+   JOIF_SSHD_CONF="${SSH_TEST_DIR}/sshd_config" \
+   JOIF_SSHD_DROPIN_DIR="${SSH_TEST_DIR}/sshd_config.d" \
+   JOIF_SSHD_DROPIN_FILE="${SSH_TEST_DIR}/sshd_config.d/00-joif-root.conf" \
+   JOIF_SSHD_BIN="${MOCK_BIN}/sshd" \
+   JOIF_CHPASSWD_BIN="${MOCK_BIN}/chpasswd" \
+   JOIF_PASSWD_BIN="${MOCK_BIN}/passwd" \
+   JOIF_SKIP_SSH_RESTART=1 \
+   JOIF_ROOT_PASSWORD_INPUT="OtraClave" \
+   bash "${REPO_DIR}/tools/acceso-root.sh" >/dev/null 2>&1; then
+    fail "acceso-root debio fallar cuando sshd -t retorna error"
+else
+    if [[ ! -f "${SSH_TEST_DIR}/sshd_config.d/00-joif-root.conf" ]]; then
+        pass "Rollback de acceso-root elimina drop-in invalido si sshd -t falla"
+    else
+        fail "Rollback de acceso-root dejo drop-in invalido"
+    fi
+fi
 
 # ------------------------------------------------------------------------------
 # Resumen final
