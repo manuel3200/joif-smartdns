@@ -107,7 +107,9 @@ nameserver 8.8.8.8
 EOF
 fi
 
-# 6. Eliminar archivos de joif-smartdns
+# 6. Eliminar protecciones de disco y archivos de joif-smartdns
+rm -f "$JOIF_LOGROTATE_FILE" "$JOIF_JOURNALD_DROPIN"
+systemctl restart systemd-journald >/dev/null 2>&1 || true
 rm -f /usr/local/bin/smartdns
 rm -rf "$JOIF_CONFIG_DIR" "$JOIF_STATE_DIR"
 if [[ -d "$JOIF_INSTALL_DIR" ]]; then

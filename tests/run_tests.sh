@@ -126,7 +126,11 @@ export JOIF_NGINX_STREAM_CONF="${JOIF_GENERATED_DIR}/nginx-stream.conf"
 export JOIF_NGINX_HTTP_CONF="${JOIF_GENERATED_DIR}/nginx-http.conf"
 export JOIF_NGINX_LOG_DIR="${TEST_ROOT}/var/log/nginx"
 export JOIF_IPSET_SAVE_FILE="${JOIF_STATE_DIR}/ipset.rules"
+export JOIF_LOGROTATE_FILE="${TEST_ROOT}/etc/logrotate.d/joif-smartdns"
+export JOIF_JOURNALD_DROPIN="${TEST_ROOT}/etc/systemd/journald.conf.d/99-joif-smartdns.conf"
 export JOIF_SKIP_SERVICE_RELOAD=1
+export JOIF_SKIP_SYSTEM_CLEANUP=1
+export JOIF_DISABLE_GEO_LOOKUP=1
 
 mkdir -p "$JOIF_DOMAINS_DIR" "$JOIF_GENERATED_DIR" "$JOIF_STATE_DIR" \
          "$(dirname "$JOIF_DNSMASQ_CONF")" "$(dirname "$JOIF_NGINX_MAIN_CONF")" "$JOIF_NGINX_LOG_DIR"
@@ -349,7 +353,7 @@ IPSET_STATE="${TEST_ROOT}/ipset_members.state"
 : > "$FW_LOG"
 : > "$IPSET_STATE"
 
-# Mock ipset que persiste miembros del set activo tras swap
+# Mock ipset que persiste miembros, flags (counters) y packets/bytes tras swap
 cat > "${MOCK_BIN}/ipset" <<EOF
 #!/usr/bin/env bash
 printf 'ipset %s\n' "\$*" >> "${FW_LOG}"
@@ -358,25 +362,69 @@ setname="\${2:-}"
 case "\$cmd" in
     create)
         touch "${TEST_ROOT}/set_\${setname}"
+        if [[ " \$* " == *" counters "* ]]; then
+            echo "counters" > "${TEST_ROOT}/hdr_\${setname}"
+        else
+            echo "plain" > "${TEST_ROOT}/hdr_\${setname}"
+        fi
         ;;
     flush)
         : > "${TEST_ROOT}/set_\${setname}"
         ;;
     add)
-        echo "\${3:-}" >> "${TEST_ROOT}/set_\${setname}"
+        member="\${3:-}"
+        pkts="0"
+        byts="0"
+        shift 3
+        while [[ \$# -gt 0 ]]; do
+            if [[ "\$1" == "packets" ]]; then pkts="\$2"; shift 2;
+            elif [[ "\$1" == "bytes" ]]; then byts="\$2"; shift 2;
+            else shift; fi
+        done
+        echo "\${member} packets \${pkts} bytes \${byts}" >> "${TEST_ROOT}/set_\${setname}"
         ;;
     swap)
         tmp="\${2:-}"
         dst="\${3:-}"
+        h1="\$(cat "${TEST_ROOT}/hdr_\${tmp}" 2>/dev/null || echo plain)"
+        h2="\$(cat "${TEST_ROOT}/hdr_\${dst}" 2>/dev/null || echo plain)"
+        if [[ "\$h1" != "\$h2" ]]; then
+            echo "ipset: sets cannot be swapped (different extensions: \$h1 vs \$h2)" >&2
+            exit 1
+        fi
         cp "${TEST_ROOT}/set_\${tmp}" "${TEST_ROOT}/set_\${dst}"
         cp "${TEST_ROOT}/set_\${dst}" "${IPSET_STATE}"
         ;;
     destroy)
-        rm -f "${TEST_ROOT}/set_\${setname}"
+        rm -f "${TEST_ROOT}/set_\${setname}" "${TEST_ROOT}/hdr_\${setname}"
+        ;;
+    list)
+        if [[ "\${2:-}" == "-t" ]]; then
+            sname="\${3:-}"
+            [[ -f "${TEST_ROOT}/set_\${sname}" ]] || exit 1
+            hdr="\$(cat "${TEST_ROOT}/hdr_\${sname}" 2>/dev/null || echo plain)"
+            echo "Name: \${sname}"
+            if [[ "\$hdr" == "counters" ]]; then
+                echo "Header: family inet hashsize 1024 maxelem 65536 counters"
+            else
+                echo "Header: family inet hashsize 1024 maxelem 65536"
+            fi
+        else
+            sname="\${2:-}"
+            [[ -f "${TEST_ROOT}/set_\${sname}" ]] || exit 1
+            echo "Name: \${sname}"
+            echo "Members:"
+            cat "${TEST_ROOT}/set_\${sname}"
+        fi
         ;;
     save)
         if [[ -f "${TEST_ROOT}/set_\${setname}" ]]; then
-            echo "create \${setname} hash:net family inet"
+            hdr="\$(cat "${TEST_ROOT}/hdr_\${setname}" 2>/dev/null || echo plain)"
+            if [[ "\$hdr" == "counters" ]]; then
+                echo "create \${setname} hash:net family inet counters"
+            else
+                echo "create \${setname} hash:net family inet"
+            fi
             while IFS= read -r m; do
                 [[ -n "\$m" ]] && echo "add \${setname} \${m}"
             done < "${TEST_ROOT}/set_\${setname}"
@@ -590,6 +638,121 @@ else
         fail "Rollback de acceso-root dejo drop-in invalido"
     fi
 fi
+
+# ------------------------------------------------------------------------------
+# 7. Fase 1: Geo/ISP liviano, ipset counters + migracion, metricas, disco 10GB, backup y updater
+# ------------------------------------------------------------------------------
+printf '\n=== [7] Fase 1: Geo/ISP, counters, metricas, disco 10 GB, backup y updater ===\n'
+
+# 7.1 Geo/ISP liviano + human bytes + edicion de alias + retrocompatibilidad v1 (6 cols)
+assert_eq "0 B"     "$(joif_human_bytes 0)"          "joif_human_bytes 0 -> 0 B"
+assert_eq "1.5 KB"  "$(joif_human_bytes 1536)"       "joif_human_bytes 1536 -> 1.5 KB"
+assert_eq "2.0 MB"  "$(joif_human_bytes 2097152)"    "joif_human_bytes 2MB -> 2.0 MB"
+assert_eq "1.00 GB" "$(joif_human_bytes 1073741824)" "joif_human_bytes 1GB -> 1.00 GB"
+
+assert_eq "Red privada/local" "$(JOIF_DISABLE_GEO_LOOKUP=0 joif_lookup_ip_geo "192.168.1.50/32")" "IP privada no consulta API externa"
+assert_eq "BR/Sao Paulo (Oracle)" "$(JOIF_GEO_OVERRIDE="BR/Sao Paulo (Oracle)" joif_lookup_ip_geo "144.22.167.150")" "joif_lookup_ip_geo respeta override y sanitiza"
+
+# Simular fila legacy v1 (6 columnas sin geo) y probar edit-alias + refresh-geo
+cat > "$JOIF_LICENSES_DB" <<'EOF'
+# joif-smartdns licenses v1
+144.22.167.150/32|Nodo Brasil Viejo|1700000000|0|activa|1700000000
+EOF
+license_edit_alias "144.22.167.150" "Nodo Brasil 01" >/dev/null
+assert_contains "$JOIF_LICENSES_DB" "144.22.167.150/32|Nodo Brasil 01|1700000000|0|activa|" "license_edit_alias actualiza alias preservando vencimiento"
+
+JOIF_GEO_OVERRIDE="BR/Sao Paulo (Oracle Cloud)" license_refresh_geo "144.22.167.150" >/dev/null
+assert_contains "$JOIF_LICENSES_DB" "|BR/Sao Paulo (Oracle Cloud)" "license_refresh_geo guarda origen Geo/ISP en licenses.db"
+
+# 7.2 Migracion en caliente de ipset v1.0 (sin counters) -> v1.1 (con counters) y preservacion de contadores
+echo "plain" > "${TEST_ROOT}/hdr_joif_smartdns_allow"
+echo "144.22.167.150/32" > "${TEST_ROOT}/set_joif_smartdns_allow"
+: > "$FW_LOG"
+bash "${REPO_DIR}/core/firewall.sh" apply >/dev/null
+assert_eq "counters" "$(cat "${TEST_ROOT}/hdr_joif_smartdns_allow")" "firewall migra ipset legacy sin counters a counters sin fallar"
+assert_not_contains "$FW_LOG" "--dport 22" "Migracion de ipset a counters NUNCA toca SSH 22"
+
+# Simular trafico acumulado en el kernel y comprobar que sync-ipset preserva packets/bytes
+echo "144.22.167.150/32 packets 420 bytes 987654" > "${TEST_ROOT}/set_joif_smartdns_allow"
+bash "${REPO_DIR}/core/firewall.sh" sync-ipset >/dev/null
+assert_contains "${TEST_ROOT}/set_joif_smartdns_allow" "144.22.167.150/32 packets 420 bytes 987654" "sync-ipset preserva contadores packets/bytes existentes tras swap"
+
+# 7.3 nginx_gen con JOIF_ACCESS_LOG=off
+JOIF_ACCESS_LOG="off" nginx_render_stream_conf "${TEST_ROOT}/stream_nolog.conf"
+JOIF_ACCESS_LOG="off" nginx_render_http_conf "${TEST_ROOT}/http_nolog.conf"
+assert_contains "${TEST_ROOT}/stream_nolog.conf" "access_log off;" "nginx stream respeta JOIF_ACCESS_LOG=off"
+assert_contains "${TEST_ROOT}/http_nolog.conf" "access_log off;" "nginx http respeta JOIF_ACCESS_LOG=off"
+
+# 7.4 Metricas livianas (top dominios + actividad por IP combinando geo + ipset + log)
+# shellcheck source=core/metrics.sh
+source "${REPO_DIR}/core/metrics.sh"
+
+cat > "${JOIF_NGINX_LOG_DIR}/joif-smartdns-stream.log" <<'EOF'
+127.0.0.1 [26/Nov/2026:16:10:00 +0000] sni="mercadopago.com.ar" allowed=1 target="mercadopago.com.ar:443" status=200 sent=1000 recv=100 time=0.05
+144.22.167.150 [26/Nov/2026:16:55:10 +0000] sni="api.transfers.prod.personalpay.dev" allowed=1 target="api.transfers.prod.personalpay.dev:443" status=200 sent=100000 recv=50000 time=2.1
+144.22.167.150 [26/Nov/2026:16:55:20 +0000] sni="mercadopago.com.ar" allowed=1 target="mercadopago.com.ar:443" status=200 sent=20000 recv=5000 time=0.4
+144.22.167.150 [26/Nov/2026:16:55:25 +0000] sni="example.com" allowed=0 target="127.0.0.1:18443" status=200 sent=0 recv=0 time=0.001
+EOF
+
+top_out="${TEST_ROOT}/top_domains.txt"
+metrics_top_domains 5 > "$top_out"
+assert_contains "$top_out" "api.transfers.prod.personalpay.dev|1|150000|" "metrics_top_domains agrega bytes y excluye 127.0.0.1 y bloqueados"
+assert_not_contains "$top_out" "example.com" "metrics_top_domains excluye SNI rechazados (allowed=0)"
+
+ip_act_out="${TEST_ROOT}/ip_activity.txt"
+metrics_ip_activity > "$ip_act_out"
+assert_contains "$ip_act_out" "144.22.167.150/32|Nodo Brasil 01|BR/Sao Paulo (Oracle Cloud)|420|987654|3|175000|26/Nov/2026:16:55:25" "metrics_ip_activity combina DB geo + ipset counters + log SNI"
+
+# 7.5 Proteccion de disco 10 GB (logrotate + journald + recorte de log gigante + backup/restore)
+# shellcheck source=core/maintenance.sh
+source "${REPO_DIR}/core/maintenance.sh"
+
+maintenance_install_disk_guards >/dev/null
+assert_contains "$JOIF_LOGROTATE_FILE" "maxsize 5M" "logrotate instalado con tope maxsize 5M"
+assert_contains "$JOIF_LOGROTATE_FILE" "rotate 2" "logrotate instalado con retencion acotada (rotate 2)"
+assert_contains "$JOIF_JOURNALD_DROPIN" "SystemMaxUse=80M" "journald limitado a 80M para VPS de 10 GB"
+
+# Simular log de >2000 bytes con tope JOIF_LOG_MAX_BYTES=2000 y verificar recorte a 500 lineas + purga .2.gz
+printf 'linea de prueba de trafico smartdns\n%.0s' {1..700} > "${JOIF_NGINX_LOG_DIR}/joif-smartdns-stream.log"
+touch "${JOIF_NGINX_LOG_DIR}/joif-smartdns-stream.log.2.gz"
+JOIF_LOG_MAX_BYTES=2000 maintenance_enforce_log_cap >/dev/null
+kept_lines="$(wc -l < "${JOIF_NGINX_LOG_DIR}/joif-smartdns-stream.log" | tr -d '[:space:]')"
+assert_eq "500" "$kept_lines" "maintenance_enforce_log_cap recorta log excedido conservando ultimas 500 lineas"
+[[ ! -f "${JOIF_NGINX_LOG_DIR}/joif-smartdns-stream.log.2.gz" ]] && pass "maintenance_enforce_log_cap elimina rotados viejos .2.gz" || fail "No elimino .2.gz"
+
+# Backup y restore + rechazo de archivo malicioso (path traversal)
+bk_file="$(maintenance_backup | tail -n1)"
+[[ -f "$bk_file" ]] && pass "maintenance_backup genera archivo .tar.gz liviano" || fail "maintenance_backup no genero archivo"
+
+# Mutar estado y restaurar desde backup
+echo "corrupted" > "$JOIF_LICENSES_DB"
+maintenance_restore "$bk_file" >/dev/null
+assert_contains "$JOIF_LICENSES_DB" "144.22.167.150/32|Nodo Brasil 01|" "maintenance_restore recupera licenses.db intacto"
+
+# 7.6 Actualizador real (core/updater.sh) con merge inteligente respetando categorias pausadas
+# shellcheck source=core/updater.sh
+source "${REPO_DIR}/core/updater.sh"
+
+UPD_INSTALL="${TEST_ROOT}/opt/joif-smartdns-upd"
+UPD_SRC="${TEST_ROOT}/fake-upstream-repo"
+mkdir -p "$UPD_INSTALL" "$UPD_SRC"
+cp -a "${REPO_DIR}/." "$UPD_SRC/"
+rm -rf "${UPD_SRC}/.git"
+
+# Agregar un dominio nuevo en upstream fintech y uno en upstream streaming (que dejaremos pausada!)
+printf '\nnuevobanco-ar.com.ar\n' >> "${UPD_SRC}/domains.d/01-fintech-bancos.list"
+printf '\nnuevostream-ar.com.ar\n' >> "${UPD_SRC}/domains.d/03-streaming-ar.list"
+domains_disable_category "03-streaming-ar" >/dev/null
+domains_custom_add "mi-custom-intacto.com.ar" >/dev/null
+
+JOIF_INSTALL_DIR="$UPD_INSTALL" updater_run --source-dir "$UPD_SRC" >/dev/null
+
+assert_contains "${JOIF_DOMAINS_DIR}/01-fintech-bancos.list" "nuevobanco-ar.com.ar" "updater hace merge de dominios nuevos en categoria activa"
+[[ -f "${JOIF_DOMAINS_DIR}/03-streaming-ar.list.disabled" && ! -f "${JOIF_DOMAINS_DIR}/03-streaming-ar.list" ]] && pass "updater mantiene pausada la categoria 03-streaming-ar" || fail "updater reactivo categoria pausada"
+assert_contains "${JOIF_DOMAINS_DIR}/03-streaming-ar.list.disabled" "nuevostream-ar.com.ar" "updater actualiza dominios dentro de categoria pausada sin activarla"
+assert_contains "${JOIF_DOMAINS_DIR}/99-custom.list" "mi-custom-intacto.com.ar" "updater preserva intacto 99-custom.list"
+assert_contains "$JOIF_LICENSES_DB" "144.22.167.150/32|Nodo Brasil 01|" "updater preserva intacto licenses.db"
+[[ -x "${UPD_INSTALL}/core/updater.sh" ]] && pass "updater despliega scripts ejecutables en JOIF_INSTALL_DIR sin requerir .git" || fail "updater no desplego scripts"
 
 # ------------------------------------------------------------------------------
 # Resumen final

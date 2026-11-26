@@ -71,6 +71,11 @@ nginx_render_stream_conf() {
         [[ -n "$d" ]] && domains+=("$d")
     done < <(domains_collect_active)
 
+    local stream_access_line="access_log ${JOIF_NGINX_LOG_DIR}/joif-smartdns-stream.log joif_stream;"
+    if [[ "${JOIF_ACCESS_LOG:-on}" == "off" ]]; then
+        stream_access_line="access_log off;"
+    fi
+
     local tmp
     tmp="$(mktemp)"
     {
@@ -79,6 +84,7 @@ nginx_render_stream_conf() {
 # joif-smartdns — NGINX Stream SNI Proxy (Puerto 443, TLS passthrough puro)
 # Generado: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 # Total dominios autorizados: ${#domains[@]}
+# Access log: ${JOIF_ACCESS_LOG:-on}
 # ==============================================================================
 
 map_hash_bucket_size 128;
@@ -138,7 +144,7 @@ server {
     proxy_socket_keepalive on;
     proxy_pass \$joif_tls_host:\$joif_tls_port;
 
-    access_log ${JOIF_NGINX_LOG_DIR}/joif-smartdns-stream.log joif_stream;
+    ${stream_access_line}
     error_log ${JOIF_NGINX_LOG_DIR}/joif-smartdns-stream-error.log warn;
 }
 EOF
@@ -164,6 +170,11 @@ nginx_render_http_conf() {
         [[ -n "$d" ]] && domains+=("$d")
     done < <(domains_collect_active)
 
+    local http_access_line="access_log ${JOIF_NGINX_LOG_DIR}/joif-smartdns-http.log joif_http;"
+    if [[ "${JOIF_ACCESS_LOG:-on}" == "off" ]]; then
+        http_access_line="access_log off;"
+    fi
+
     local tmp
     tmp="$(mktemp)"
     {
@@ -172,6 +183,7 @@ nginx_render_http_conf() {
 # joif-smartdns — NGINX HTTP Proxy Transparente (Puerto 80)
 # Generado: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 # Total dominios autorizados: ${#domains[@]}
+# Access log: ${JOIF_ACCESS_LOG:-on}
 # ==============================================================================
 
 server_tokens off;
@@ -207,7 +219,7 @@ server {
     resolver ${JOIF_UPSTREAM_DNS_1} ${JOIF_UPSTREAM_DNS_2} ${JOIF_UPSTREAM_DNS_3} ${JOIF_UPSTREAM_DNS_4} valid=300s ipv6=off;
     resolver_timeout 5s;
 
-    access_log ${JOIF_NGINX_LOG_DIR}/joif-smartdns-http.log joif_http;
+    ${http_access_line}
     error_log ${JOIF_NGINX_LOG_DIR}/joif-smartdns-http-error.log warn;
 
     location / {

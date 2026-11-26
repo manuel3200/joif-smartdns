@@ -164,7 +164,7 @@ install_packages() {
 deploy_files() {
     log_info "Instalando archivos de joif-smartdns en ${JOIF_INSTALL_DIR}..."
     joif_ensure_dirs
-    mkdir -p "${JOIF_INSTALL_DIR}/core" "${JOIF_INSTALL_DIR}/domains.d" "${JOIF_INSTALL_DIR}/systemd"
+    mkdir -p "${JOIF_INSTALL_DIR}/core" "${JOIF_INSTALL_DIR}/domains.d" "${JOIF_INSTALL_DIR}/systemd" "${JOIF_INSTALL_DIR}/tools"
 
     if [[ "$(readlink -f "$REPO_DIR")" != "$(readlink -f "$JOIF_INSTALL_DIR")" ]]; then
         cp -f "${REPO_DIR}/install.sh" "${JOIF_INSTALL_DIR}/install.sh"
@@ -173,12 +173,16 @@ deploy_files() {
         cp -f "${REPO_DIR}/core/"*.sh "${JOIF_INSTALL_DIR}/core/"
         cp -f "${REPO_DIR}/domains.d/"*.list "${JOIF_INSTALL_DIR}/domains.d/"
         cp -f "${REPO_DIR}/systemd/"* "${JOIF_INSTALL_DIR}/systemd/"
+        if [[ -d "${REPO_DIR}/tools" ]]; then
+            cp -f "${REPO_DIR}/tools/"*.sh "${JOIF_INSTALL_DIR}/tools/" 2>/dev/null || true
+        fi
     fi
 
     chmod 755 "${JOIF_INSTALL_DIR}/install.sh" \
               "${JOIF_INSTALL_DIR}/uninstall.sh" \
               "${JOIF_INSTALL_DIR}/menu.sh" \
               "${JOIF_INSTALL_DIR}/core/"*.sh
+    chmod 755 "${JOIF_INSTALL_DIR}/tools/"*.sh 2>/dev/null || true
 
     # Copiar listas por defecto sin sobreescribir listas ya personalizadas o desactivadas
     local src base slug
@@ -312,10 +316,13 @@ main() {
     dnsmasq_apply "$JOIF_PUBLIC_IP"
     nginx_apply
 
-    # Inicializar licencias, systemd y firewall seguro (NUNCA toca SSH 22)
+    # Inicializar licencias, protecciones de disco (10 GB), systemd y firewall seguro (NUNCA toca SSH 22)
     setup_initial_license
+    bash "${JOIF_INSTALL_DIR}/core/licenses.sh" refresh-geo >/dev/null 2>&1 || true
+    bash "${JOIF_INSTALL_DIR}/core/maintenance.sh" install-guards
     install_systemd_units
     systemctl restart joif-smartdns-firewall.service
+    bash "${JOIF_INSTALL_DIR}/core/maintenance.sh" cleanup >/dev/null 2>&1 || true
 
     # Ejecutar diagnostico final
     bash "${JOIF_INSTALL_DIR}/core/diagnostics.sh" || true

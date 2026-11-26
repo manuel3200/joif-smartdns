@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# core/licenses.sh — Gestion de licencias por IP/CIDR (alta, renovacion, suspension, expiracion)
+# core/licenses.sh — Gestion de licencias por IP/CIDR (alta, renovacion, suspension, expiracion, geo liviano)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=core/common.sh
@@ -12,8 +12,8 @@ license_init_db() {
     mkdir -p "$(dirname "$JOIF_LICENSES_DB")"
     if [[ ! -f "$JOIF_LICENSES_DB" ]]; then
         cat > "$JOIF_LICENSES_DB" <<'EOF'
-# joif-smartdns licenses v1
-# ip_cidr|alias|created_at|expires_at|status|updated_at
+# joif-smartdns licenses v2
+# ip_cidr|alias|created_at|expires_at|status|updated_at|geo
 EOF
         chmod 640 "$JOIF_LICENSES_DB"
     fi
@@ -21,7 +21,6 @@ EOF
 
 _license_sync_hook() {
     if [[ "${JOIF_AUTO_SYNC_FIREWALL:-1}" == "1" && -f "${SCRIPT_DIR}/firewall.sh" ]]; then
-        # Ejecutar sync en subshell para evitar dependencias circulares
         bash "${SCRIPT_DIR}/firewall.sh" sync-ipset || {
             log_warn "Licencia actualizada en DB, pero fallo la sincronizacion inmediata con ipset."
             return 1
@@ -49,14 +48,18 @@ license_find() {
     return 1
 }
 
-# Lista filas crudas (sin comentarios)
+# Lista filas crudas (sin comentarios), normalizando filas v1 (6 cols) a v2 (7 cols con geo)
 license_list_raw() {
     license_init_db
-    local line
+    local line ip alias created expires status updated geo
     while IFS= read -r line || [[ -n "$line" ]]; do
         line="${line//$'\r'/}"
         [[ -z "$line" || "$line" == \#* ]] && continue
-        printf '%s\n' "$line"
+        geo=""
+        IFS='|' read -r ip alias created expires status updated geo <<< "$line"
+        [[ -z "$ip" ]] && continue
+        [[ -z "$geo" ]] && geo="-"
+        printf '%s|%s|%s|%s|%s|%s|%s\n' "$ip" "$alias" "$created" "$expires" "$status" "$updated" "$geo"
     done < "$JOIF_LICENSES_DB"
 }
 
@@ -66,8 +69,8 @@ license_active_ips() {
     local now
     now="$(joif_now_epoch)"
 
-    local line ip alias created expires status updated
-    while IFS='|' read -r ip alias created expires status updated; do
+    local ip alias created expires status updated geo
+    while IFS='|' read -r ip alias created expires status updated geo; do
         [[ -z "$ip" ]] && continue
         if [[ "$status" == "activa" ]]; then
             if [[ "$expires" == "0" ]] || (( expires > now )); then
@@ -84,7 +87,7 @@ license_add() {
     local days="${3:-0}"
     local mode="${4:-}"
 
-    local cidr alias now expires
+    local cidr alias now expires geo
     if ! cidr="$(joif_normalize_cidr "$raw_ip")"; then
         log_error "IP o subred CIDR invalida: '${raw_ip}'. Ejemplos: 203.0.113.10 o 203.0.113.0/24"
         return 1
@@ -103,11 +106,14 @@ license_add() {
         expires=$(( now + (10#$days * 86400) ))
     fi
 
+    geo="$(joif_lookup_ip_geo "$cidr" || printf '%s\n' "-")"
+    [[ -z "$geo" ]] && geo="-"
+
     license_init_db
 
     if license_find "$cidr" >/dev/null 2>&1; then
         if [[ "$mode" == "--upsert" ]]; then
-            local tmp line cur_ip cur_alias cur_created cur_expires cur_status cur_updated
+            local tmp line cur_ip cur_alias cur_created cur_expires cur_status cur_updated cur_geo
             tmp="$(mktemp "$(dirname "$JOIF_LICENSES_DB")/.licenses.XXXXXX")"
             while IFS= read -r line || [[ -n "$line" ]]; do
                 line="${line//$'\r'/}"
@@ -115,16 +121,18 @@ license_add() {
                     printf '%s\n' "$line" >> "$tmp"
                     continue
                 fi
-                IFS='|' read -r cur_ip cur_alias cur_created cur_expires cur_status cur_updated <<< "$line"
+                cur_geo=""
+                IFS='|' read -r cur_ip cur_alias cur_created cur_expires cur_status cur_updated cur_geo <<< "$line"
                 if [[ "$cur_ip" == "$cidr" ]]; then
-                    printf '%s|%s|%s|%s|activa|%s\n' "$cidr" "$alias" "$cur_created" "$expires" "$now" >> "$tmp"
+                    [[ "$geo" == "-" && -n "$cur_geo" ]] && geo="$cur_geo"
+                    printf '%s|%s|%s|%s|activa|%s|%s\n' "$cidr" "$alias" "$cur_created" "$expires" "$now" "${geo:--}" >> "$tmp"
                 else
-                    printf '%s\n' "$line" >> "$tmp"
+                    printf '%s|%s|%s|%s|%s|%s|%s\n' "$cur_ip" "$cur_alias" "$cur_created" "$cur_expires" "$cur_status" "$cur_updated" "${cur_geo:--}" >> "$tmp"
                 fi
             done < "$JOIF_LICENSES_DB"
             chmod 640 "$tmp"
             mv -f "$tmp" "$JOIF_LICENSES_DB"
-            log_ok "Licencia actualizada: ${cidr} (${alias}) -> $(joif_format_epoch "$expires")"
+            log_ok "Licencia actualizada: ${cidr} (${alias}) | Origen: ${geo} | Vigencia: $(joif_format_epoch "$expires")"
             _license_sync_hook
             return 0
         fi
@@ -132,9 +140,93 @@ license_add() {
         return 1
     fi
 
-    printf '%s|%s|%s|%s|activa|%s\n' "$cidr" "$alias" "$now" "$expires" "$now" >> "$JOIF_LICENSES_DB"
-    log_ok "IP autorizada: ${cidr} (${alias}) | Vigencia: $(joif_format_epoch "$expires")"
+    printf '%s|%s|%s|%s|activa|%s|%s\n' "$cidr" "$alias" "$now" "$expires" "$now" "$geo" >> "$JOIF_LICENSES_DB"
+    log_ok "IP autorizada: ${cidr} (${alias}) | Origen: ${geo} | Vigencia: $(joif_format_epoch "$expires")"
     _license_sync_hook
+}
+
+# Editar alias de una licencia existente sin alterar vencimiento ni contadores
+license_edit_alias() {
+    local raw_ip="${1:-}"
+    local raw_alias="${2:-}"
+
+    local cidr new_alias
+    if ! cidr="$(joif_normalize_cidr "$raw_ip")"; then
+        log_error "IP o subred CIDR invalida: '${raw_ip}'."
+        return 1
+    fi
+    new_alias="$(joif_sanitize_alias "$raw_alias")"
+
+    license_init_db
+    local now tmp found=0 line cur_ip cur_alias cur_created cur_expires cur_status cur_updated cur_geo
+    now="$(joif_now_epoch)"
+    tmp="$(mktemp "$(dirname "$JOIF_LICENSES_DB")/.licenses.XXXXXX")"
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line//$'\r'/}"
+        if [[ -z "$line" || "$line" == \#* ]]; then
+            printf '%s\n' "$line" >> "$tmp"
+            continue
+        fi
+        cur_geo=""
+        IFS='|' read -r cur_ip cur_alias cur_created cur_expires cur_status cur_updated cur_geo <<< "$line"
+        if [[ "$cur_ip" == "$cidr" ]]; then
+            found=1
+            printf '%s|%s|%s|%s|%s|%s|%s\n' "$cur_ip" "$new_alias" "$cur_created" "$cur_expires" "$cur_status" "$now" "${cur_geo:--}" >> "$tmp"
+        else
+            printf '%s|%s|%s|%s|%s|%s|%s\n' "$cur_ip" "$cur_alias" "$cur_created" "$cur_expires" "$cur_status" "$cur_updated" "${cur_geo:--}" >> "$tmp"
+        fi
+    done < "$JOIF_LICENSES_DB"
+
+    if [[ "$found" -eq 0 ]]; then
+        rm -f "$tmp"
+        log_error "No se encontro la licencia para '${cidr}'."
+        return 1
+    fi
+
+    chmod 640 "$tmp"
+    mv -f "$tmp" "$JOIF_LICENSES_DB"
+    log_ok "Alias actualizado para ${cidr}: '${new_alias}'"
+}
+
+# Actualiza informacion liviana de origen (Pais/Ciudad/ISP) para una IP o todas las pendientes
+license_refresh_geo() {
+    local raw_target="${1:-}"
+    local target_cidr=""
+    if [[ -n "$raw_target" ]]; then
+        if ! target_cidr="$(joif_normalize_cidr "$raw_target")"; then
+            log_error "IP o subred CIDR invalida: '${raw_target}'."
+            return 1
+        fi
+    fi
+
+    license_init_db
+    local now tmp updated_count=0 line cur_ip cur_alias cur_created cur_expires cur_status cur_updated cur_geo new_geo
+    now="$(joif_now_epoch)"
+    tmp="$(mktemp "$(dirname "$JOIF_LICENSES_DB")/.licenses.XXXXXX")"
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line//$'\r'/}"
+        if [[ -z "$line" || "$line" == \#* ]]; then
+            printf '%s\n' "$line" >> "$tmp"
+            continue
+        fi
+        cur_geo=""
+        IFS='|' read -r cur_ip cur_alias cur_created cur_expires cur_status cur_updated cur_geo <<< "$line"
+        [[ -z "$cur_geo" ]] && cur_geo="-"
+
+        if [[ -n "$target_cidr" && "$cur_ip" == "$target_cidr" ]] || [[ -z "$target_cidr" && "$cur_geo" == "-" ]]; then
+            new_geo="$(joif_lookup_ip_geo "$cur_ip" || printf '%s\n' "-")"
+            [[ -n "$new_geo" && "$new_geo" != "-" ]] && cur_geo="$new_geo" && updated_count=$((updated_count + 1))
+            printf '%s|%s|%s|%s|%s|%s|%s\n' "$cur_ip" "$cur_alias" "$cur_created" "$cur_expires" "$cur_status" "$now" "$cur_geo" >> "$tmp"
+        else
+            printf '%s|%s|%s|%s|%s|%s|%s\n' "$cur_ip" "$cur_alias" "$cur_created" "$cur_expires" "$cur_status" "$cur_updated" "$cur_geo" >> "$tmp"
+        fi
+    done < "$JOIF_LICENSES_DB"
+
+    chmod 640 "$tmp"
+    mv -f "$tmp" "$JOIF_LICENSES_DB"
+    log_ok "Informacion de origen (Geo/ISP) actualizada en ${updated_count} IP(s)."
 }
 
 # Renovar licencia: suma dias desde max(now, expires_at), o 0 para permanente, y activa
@@ -153,7 +245,7 @@ license_renew() {
     fi
 
     license_init_db
-    local now tmp found=0 line cur_ip cur_alias cur_created cur_expires cur_status cur_updated new_expires base
+    local now tmp found=0 line cur_ip cur_alias cur_created cur_expires cur_status cur_updated cur_geo new_expires base
     now="$(joif_now_epoch)"
     tmp="$(mktemp "$(dirname "$JOIF_LICENSES_DB")/.licenses.XXXXXX")"
 
@@ -163,7 +255,8 @@ license_renew() {
             printf '%s\n' "$line" >> "$tmp"
             continue
         fi
-        IFS='|' read -r cur_ip cur_alias cur_created cur_expires cur_status cur_updated <<< "$line"
+        cur_geo=""
+        IFS='|' read -r cur_ip cur_alias cur_created cur_expires cur_status cur_updated cur_geo <<< "$line"
         if [[ "$cur_ip" == "$cidr" ]]; then
             found=1
             if (( 10#$days == 0 )); then
@@ -176,9 +269,9 @@ license_renew() {
                 fi
                 new_expires=$(( base + (10#$days * 86400) ))
             fi
-            printf '%s|%s|%s|%s|activa|%s\n' "$cur_ip" "$cur_alias" "$cur_created" "$new_expires" "$now" >> "$tmp"
+            printf '%s|%s|%s|%s|activa|%s|%s\n' "$cur_ip" "$cur_alias" "$cur_created" "$new_expires" "$now" "${cur_geo:--}" >> "$tmp"
         else
-            printf '%s\n' "$line" >> "$tmp"
+            printf '%s|%s|%s|%s|%s|%s|%s\n' "$cur_ip" "$cur_alias" "$cur_created" "$cur_expires" "$cur_status" "$cur_updated" "${cur_geo:--}" >> "$tmp"
         fi
     done < "$JOIF_LICENSES_DB"
 
@@ -204,7 +297,7 @@ license_suspend() {
     fi
 
     license_init_db
-    local now tmp found=0 line cur_ip cur_alias cur_created cur_expires cur_status cur_updated
+    local now tmp found=0 line cur_ip cur_alias cur_created cur_expires cur_status cur_updated cur_geo
     now="$(joif_now_epoch)"
     tmp="$(mktemp "$(dirname "$JOIF_LICENSES_DB")/.licenses.XXXXXX")"
 
@@ -214,12 +307,13 @@ license_suspend() {
             printf '%s\n' "$line" >> "$tmp"
             continue
         fi
-        IFS='|' read -r cur_ip cur_alias cur_created cur_expires cur_status cur_updated <<< "$line"
+        cur_geo=""
+        IFS='|' read -r cur_ip cur_alias cur_created cur_expires cur_status cur_updated cur_geo <<< "$line"
         if [[ "$cur_ip" == "$cidr" ]]; then
             found=1
-            printf '%s|%s|%s|%s|suspendida|%s\n' "$cur_ip" "$cur_alias" "$cur_created" "$cur_expires" "$now" >> "$tmp"
+            printf '%s|%s|%s|%s|suspendida|%s|%s\n' "$cur_ip" "$cur_alias" "$cur_created" "$cur_expires" "$now" "${cur_geo:--}" >> "$tmp"
         else
-            printf '%s\n' "$line" >> "$tmp"
+            printf '%s|%s|%s|%s|%s|%s|%s\n' "$cur_ip" "$cur_alias" "$cur_created" "$cur_expires" "$cur_status" "$cur_updated" "${cur_geo:--}" >> "$tmp"
         fi
     done < "$JOIF_LICENSES_DB"
 
@@ -245,7 +339,7 @@ license_reactivate() {
     fi
 
     license_init_db
-    local now tmp found=0 expired_err=0 line cur_ip cur_alias cur_created cur_expires cur_status cur_updated
+    local now tmp found=0 expired_err=0 line cur_ip cur_alias cur_created cur_expires cur_status cur_updated cur_geo
     now="$(joif_now_epoch)"
     tmp="$(mktemp "$(dirname "$JOIF_LICENSES_DB")/.licenses.XXXXXX")"
 
@@ -255,17 +349,18 @@ license_reactivate() {
             printf '%s\n' "$line" >> "$tmp"
             continue
         fi
-        IFS='|' read -r cur_ip cur_alias cur_created cur_expires cur_status cur_updated <<< "$line"
+        cur_geo=""
+        IFS='|' read -r cur_ip cur_alias cur_created cur_expires cur_status cur_updated cur_geo <<< "$line"
         if [[ "$cur_ip" == "$cidr" ]]; then
             found=1
             if [[ "$cur_expires" != "0" ]] && (( cur_expires <= now )); then
                 expired_err=1
-                printf '%s\n' "$line" >> "$tmp"
+                printf '%s|%s|%s|%s|%s|%s|%s\n' "$cur_ip" "$cur_alias" "$cur_created" "$cur_expires" "$cur_status" "$cur_updated" "${cur_geo:--}" >> "$tmp"
             else
-                printf '%s|%s|%s|%s|activa|%s\n' "$cur_ip" "$cur_alias" "$cur_created" "$cur_expires" "$now" >> "$tmp"
+                printf '%s|%s|%s|%s|activa|%s|%s\n' "$cur_ip" "$cur_alias" "$cur_created" "$cur_expires" "$now" "${cur_geo:--}" >> "$tmp"
             fi
         else
-            printf '%s\n' "$line" >> "$tmp"
+            printf '%s|%s|%s|%s|%s|%s|%s\n' "$cur_ip" "$cur_alias" "$cur_created" "$cur_expires" "$cur_status" "$cur_updated" "${cur_geo:--}" >> "$tmp"
         fi
     done < "$JOIF_LICENSES_DB"
 
@@ -330,7 +425,7 @@ license_expire_overdue() {
     local force_sync="${1:-}"
     license_init_db
 
-    local now tmp changed=0 line cur_ip cur_alias cur_created cur_expires cur_status cur_updated
+    local now tmp changed=0 line cur_ip cur_alias cur_created cur_expires cur_status cur_updated cur_geo
     now="$(joif_now_epoch)"
     tmp="$(mktemp "$(dirname "$JOIF_LICENSES_DB")/.licenses.XXXXXX")"
 
@@ -340,13 +435,14 @@ license_expire_overdue() {
             printf '%s\n' "$line" >> "$tmp"
             continue
         fi
-        IFS='|' read -r cur_ip cur_alias cur_created cur_expires cur_status cur_updated <<< "$line"
+        cur_geo=""
+        IFS='|' read -r cur_ip cur_alias cur_created cur_expires cur_status cur_updated cur_geo <<< "$line"
         if [[ "$cur_status" == "activa" && "$cur_expires" != "0" ]] && (( cur_expires <= now )); then
             changed=$((changed + 1))
             log_warn "Licencia vencida desactivada automaticamente: ${cur_ip} (${cur_alias})"
-            printf '%s|%s|%s|%s|suspendida|%s\n' "$cur_ip" "$cur_alias" "$cur_created" "$cur_expires" "$now" >> "$tmp"
+            printf '%s|%s|%s|%s|suspendida|%s|%s\n' "$cur_ip" "$cur_alias" "$cur_created" "$cur_expires" "$now" "${cur_geo:--}" >> "$tmp"
         else
-            printf '%s\n' "$line" >> "$tmp"
+            printf '%s|%s|%s|%s|%s|%s|%s\n' "$cur_ip" "$cur_alias" "$cur_created" "$cur_expires" "$cur_status" "$cur_updated" "${cur_geo:--}" >> "$tmp"
         fi
     done < "$JOIF_LICENSES_DB"
 
@@ -365,29 +461,47 @@ license_expire_overdue() {
     printf '%s\n' "$changed"
 }
 
-# Imprime tabla formateada para la consola
+# Imprime tabla formateada con origen (Geo/ISP) y trafico del kernel (ipset counters)
 license_print_table() {
     license_init_db
     local now
     now="$(joif_now_epoch)"
 
-    printf '%b%-20s %-24s %-22s %-22s %-14s%b\n' \
-        "$C_BOLD" "IP / CIDR" "ALIAS / CLIENTE" "ESTADO" "EXPIRACION" "RESTANTE" "$C_RESET"
-    printf '%s\n' "----------------------------------------------------------------------------------------------------------"
+    # Cargar contadores de trafico de ipset si esta disponible (0 KB en disco)
+    declare -A _ip_bytes=()
+    if command -v "$JOIF_IPSET_BIN" >/dev/null 2>&1; then
+        local m_ip m_pkts m_bytes norm_m
+        while read -r m_ip _ m_pkts _ m_bytes; do
+            [[ -z "$m_ip" || ! "${m_bytes:-}" =~ ^[0-9]+$ ]] && continue
+            norm_m="$m_ip"
+            [[ "$norm_m" != */* ]] && norm_m="${norm_m}/32"
+            _ip_bytes["$norm_m"]="$m_bytes"
+        done < <("$JOIF_IPSET_BIN" list "$JOIF_IPSET_NAME" 2>/dev/null | awk '/^Members:/{f=1;next} f && $2=="packets" && $4=="bytes"{print $1, $2, $3, $4, $5}' || true)
+    fi
 
-    local count=0 ip alias created expires status updated
-    local exp_str rem_str state_str rem_sec rem_days rem_hours
-    while IFS='|' read -r ip alias created expires status updated; do
+    printf '%b%-19s %-18s %-24s %-10s %-16s %-11s%b\n' \
+        "$C_BOLD" "IP / CIDR" "ALIAS" "ORIGEN (GEO/ISP)" "TRAFICO" "ESTADO" "RESTANTE" "$C_RESET"
+    printf '%s\n' "--------------------------------------------------------------------------------------------------------"
+
+    local count=0 ip alias created expires status updated geo
+    local rem_str state_str traf_str rem_sec rem_days rem_hours
+    while IFS='|' read -r ip alias created expires status updated geo; do
         [[ -z "$ip" ]] && continue
         count=$((count + 1))
-        exp_str="$(joif_format_epoch "$expires")"
+        [[ -z "$geo" ]] && geo="-"
+
+        if [[ -n "${_ip_bytes[$ip]:-}" ]]; then
+            traf_str="$(joif_human_bytes "${_ip_bytes[$ip]}")"
+        else
+            traf_str="-"
+        fi
 
         if [[ "$expires" == "0" ]]; then
             rem_str="permanente"
             state_str="$status"
         elif (( expires <= now )); then
             rem_str="VENCIDA"
-            state_str="${status} (vencida)"
+            state_str="${status}(venc)"
         else
             rem_sec=$(( expires - now ))
             rem_days=$(( rem_sec / 86400 ))
@@ -403,15 +517,11 @@ license_print_table() {
         fi
 
         local color="$C_GREEN"
-        if [[ "$status" != "activa" ]]; then
-            color="$C_YELLOW"
-        fi
-        if [[ "$rem_str" == "VENCIDA" ]]; then
-            color="$C_RED"
-        fi
+        [[ "$status" != "activa" ]] && color="$C_YELLOW"
+        [[ "$rem_str" == "VENCIDA" ]] && color="$C_RED"
 
-        printf '%-20s %-24s %b%-22s%b %-22s %-14s\n' \
-            "$ip" "${alias:0:23}" "$color" "$state_str" "$C_RESET" "$exp_str" "$rem_str"
+        printf '%-19s %-18s %-24s %-10s %b%-16s%b %-11s\n' \
+            "$ip" "${alias:0:17}" "${geo:0:23}" "$traf_str" "$color" "$state_str" "$C_RESET" "$rem_str"
     done < <(license_list_raw)
 
     if (( count == 0 )); then
@@ -424,17 +534,19 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     cmd="${1:-list}"
     shift || true
     case "$cmd" in
-        add)        joif_with_lock license_add "${1:-}" "${2:-}" "${3:-0}" "${4:-}" ;;
-        renew)      joif_with_lock license_renew "${1:-}" "${2:-}" ;;
-        suspend)    joif_with_lock license_suspend "${1:-}" ;;
-        reactivate) joif_with_lock license_reactivate "${1:-}" ;;
-        remove)     joif_with_lock license_remove "${1:-}" ;;
-        expire)     joif_with_lock license_expire_overdue "${1:-}" ;;
-        active)     license_active_ips ;;
-        list)       license_print_table ;;
-        raw)        license_list_raw ;;
+        add)         joif_with_lock license_add "${1:-}" "${2:-}" "${3:-0}" "${4:-}" ;;
+        edit-alias)  joif_with_lock license_edit_alias "${1:-}" "${2:-}" ;;
+        refresh-geo) joif_with_lock license_refresh_geo "${1:-}" ;;
+        renew)       joif_with_lock license_renew "${1:-}" "${2:-}" ;;
+        suspend)     joif_with_lock license_suspend "${1:-}" ;;
+        reactivate)  joif_with_lock license_reactivate "${1:-}" ;;
+        remove)      joif_with_lock license_remove "${1:-}" ;;
+        expire)      joif_with_lock license_expire_overdue "${1:-}" ;;
+        active)      license_active_ips ;;
+        list)        license_print_table ;;
+        raw)         license_list_raw ;;
         *)
-            echo "Uso: $0 {add|renew|suspend|reactivate|remove|expire|active|list|raw} [args]" >&2
+            echo "Uso: $0 {add|edit-alias|refresh-geo|renew|suspend|reactivate|remove|expire|active|list|raw} [args]" >&2
             exit 1
             ;;
     esac

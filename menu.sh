@@ -23,6 +23,12 @@ source "${APP_DIR}/core/nginx_gen.sh"
 source "${APP_DIR}/core/licenses.sh"
 # shellcheck source=core/diagnostics.sh
 source "${APP_DIR}/core/diagnostics.sh"
+# shellcheck source=core/metrics.sh
+source "${APP_DIR}/core/metrics.sh"
+# shellcheck source=core/maintenance.sh
+source "${APP_DIR}/core/maintenance.sh"
+# shellcheck source=core/updater.sh
+source "${APP_DIR}/core/updater.sh"
 
 pause_prompt() {
     printf '\n'
@@ -334,10 +340,18 @@ Sin argumentos abre el panel interactivo.
 
 Comandos CLI disponibles:
   smartdns status                              Ejecuta diagnostico completo en vivo
+  smartdns metrics                             Muestra Mbps en vivo, disco/RAM, origen/trafico por IP y top dominios
   smartdns reload                              Regenera y valida dnsmasq + nginx con rollback
   smartdns sync-licenses                       Purga licencias vencidas y sincroniza ipset
-  smartdns ip list                             Lista todas las IPs autorizadas
+  smartdns update [--no-lists]                 Actualiza joif-smartdns desde GitHub conservando licencias y config
+  smartdns cleanup [--clear-logs]              Libera cache APT, journald y logs rotados (ideal para VPS 10 GB)
+  smartdns backup [archivo.tar.gz]             Crea respaldo liviano (~3 KB) de config, licencias y listas
+  smartdns restore <archivo.tar.gz>            Restaura un respaldo previo y recarga servicios
+  smartdns logs <on|off>                       Activa o desactiva access_log de nginx (ahorro maximo de disco)
+  smartdns ip list                             Lista todas las IPs autorizadas con origen Geo/ISP y trafico
   smartdns ip add <ip/cidr> <alias> [dias]     Autoriza nueva IP (dias=0 permanente)
+  smartdns ip edit-alias <ip/cidr> <alias>     Cambia el alias de una IP autorizada
+  smartdns ip refresh-geo [ip/cidr]            Actualiza Pais/Ciudad/ISP de una IP o todas las pendientes
   smartdns ip renew <ip/cidr> <dias>           Renueva licencia (dias=0 permanente)
   smartdns ip suspend <ip/cidr>                Suspende licencia inmediatamente
   smartdns ip reactivate <ip/cidr>             Reactiva licencia vigente
@@ -368,6 +382,10 @@ main() {
             joif_require_root
             diagnostics_run
             ;;
+        metrics)
+            joif_require_root
+            metrics_print_report
+            ;;
         reload)
             joif_require_root
             reload_services_safe
@@ -376,18 +394,49 @@ main() {
             joif_require_root
             bash "${APP_DIR}/core/expire-licenses.sh"
             ;;
+        update)
+            joif_require_root
+            joif_with_lock updater_run "$@"
+            ;;
+        cleanup)
+            joif_require_root
+            maintenance_cleanup_disk "${1:-}"
+            ;;
+        backup)
+            joif_require_root
+            maintenance_backup "${1:-}"
+            ;;
+        restore)
+            joif_require_root
+            maintenance_restore "${1:-}"
+            ;;
+        logs)
+            joif_require_root
+            local mode="${1:-}"
+            if [[ "$mode" != "on" && "$mode" != "off" ]]; then
+                log_error "Uso: smartdns logs <on|off>"
+                exit 1
+            fi
+            joif_load_config
+            JOIF_ACCESS_LOG="$mode"
+            joif_save_config
+            nginx_apply
+            log_ok "Access log de nginx configurado en: ${mode}"
+            ;;
         ip)
             joif_require_root
             local sub="${1:-list}"
             shift || true
             case "$sub" in
-                list)       license_print_table ;;
-                add)        joif_with_lock license_add "${1:-}" "${2:-Sin alias}" "${3:-0}" ;;
-                renew)      joif_with_lock license_renew "${1:-}" "${2:-}" ;;
-                suspend)    joif_with_lock license_suspend "${1:-}" ;;
-                reactivate) joif_with_lock license_reactivate "${1:-}" ;;
-                remove)     joif_with_lock license_remove "${1:-}" ;;
-                *)          cli_usage; exit 1 ;;
+                list)        license_print_table ;;
+                add)         joif_with_lock license_add "${1:-}" "${2:-Sin alias}" "${3:-0}" ;;
+                edit-alias)  joif_with_lock license_edit_alias "${1:-}" "${2:-}" ;;
+                refresh-geo) joif_with_lock license_refresh_geo "${1:-}" ;;
+                renew)       joif_with_lock license_renew "${1:-}" "${2:-}" ;;
+                suspend)     joif_with_lock license_suspend "${1:-}" ;;
+                reactivate)  joif_with_lock license_reactivate "${1:-}" ;;
+                remove)      joif_with_lock license_remove "${1:-}" ;;
+                *)           cli_usage; exit 1 ;;
             esac
             ;;
         domains)

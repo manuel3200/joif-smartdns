@@ -4,7 +4,9 @@
 [[ -n "${JOIF_COMMON_LOADED:-}" ]] && return 0
 JOIF_COMMON_LOADED=1
 
-JOIF_VERSION="1.0.0"
+JOIF_VERSION="1.1.0"
+JOIF_REPO_URL="${JOIF_REPO_URL:-https://github.com/manuel3200/joif-smartdns.git}"
+JOIF_DOCS_URL="${JOIF_DOCS_URL:-https://github.com/manuel3200/joif-smartdns/blob/main/docs/GUIA-COMPLETA.md}"
 
 # Rutas principales (sobreescribibles via variables de entorno para pruebas locales)
 JOIF_INSTALL_DIR="${JOIF_INSTALL_DIR:-/opt/joif-smartdns}"
@@ -42,6 +44,9 @@ JOIF_UPSTREAM_DNS_1="${JOIF_UPSTREAM_DNS_1:-1.1.1.1}"
 JOIF_UPSTREAM_DNS_2="${JOIF_UPSTREAM_DNS_2:-8.8.8.8}"
 JOIF_UPSTREAM_DNS_3="${JOIF_UPSTREAM_DNS_3:-1.0.0.1}"
 JOIF_UPSTREAM_DNS_4="${JOIF_UPSTREAM_DNS_4:-8.8.4.4}"
+JOIF_ACCESS_LOG="${JOIF_ACCESS_LOG:-on}"
+JOIF_LOGROTATE_FILE="${JOIF_LOGROTATE_FILE:-/etc/logrotate.d/joif-smartdns}"
+JOIF_JOURNALD_DROPIN="${JOIF_JOURNALD_DROPIN:-/etc/systemd/journald.conf.d/99-joif-smartdns.conf}"
 
 # Colores ANSI (desactivables con NO_COLOR=1 o cuando stdout no es TTY)
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -257,6 +262,99 @@ joif_detect_public_ip() {
     return 1
 }
 
+# Detecta IPs privadas, loopback o reservadas de documentacion (evita consultas GeoIP innecesarias)
+joif_is_private_ipv4() {
+    local ip="${1%%/*}"
+    case "$ip" in
+        10.*|127.*|169.254.*|192.168.*|192.0.2.*|198.51.100.*|203.0.113.*)
+            return 0
+            ;;
+        172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|100.6[4-9].*|100.[7-9][0-9].*|100.1[0-1][0-9].*|100.12[0-7].*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+# Consulta super liviana (~150 bytes, 0 KB en disco) de Pais / Ciudad (ISP) de una IP publica
+joif_lookup_ip_geo() {
+    local raw="${1:-}"
+    local ip="${raw%%/*}"
+
+    if [[ -n "${JOIF_GEO_OVERRIDE:-}" ]]; then
+        joif_sanitize_alias "$JOIF_GEO_OVERRIDE"
+        return 0
+    fi
+    if [[ "${JOIF_DISABLE_GEO_LOOKUP:-0}" == "1" ]]; then
+        printf '%s\n' "-"
+        return 0
+    fi
+    if ! joif_validate_ipv4 "$ip"; then
+        printf '%s\n' "-"
+        return 0
+    fi
+    if joif_is_private_ipv4 "$ip"; then
+        printf '%s\n' "Red privada/local"
+        return 0
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        printf '%s\n' "-"
+        return 0
+    fi
+
+    # 1) ip-api.com en texto plano (4 lineas: status, countryCode, city, isp — sin jq ni DB local)
+    local out status cc city isp label=""
+    out="$(curl -4 -fsSL --connect-timeout 2 --max-time 3 "http://ip-api.com/line/${ip}?fields=status,countryCode,city,isp" 2>/dev/null || true)"
+    if [[ -n "$out" ]]; then
+        status="$(printf '%s\n' "$out" | sed -n '1p' | tr -d '\r')"
+        cc="$(printf '%s\n' "$out" | sed -n '2p' | tr -d '\r')"
+        city="$(printf '%s\n' "$out" | sed -n '3p' | tr -d '\r')"
+        isp="$(printf '%s\n' "$out" | sed -n '4p' | tr -d '\r')"
+        if [[ "$status" == "success" && -n "$cc" ]]; then
+            label="$cc"
+            [[ -n "$city" ]] && label="${label}/${city}"
+            [[ -n "$isp" ]]  && label="${label} (${isp})"
+        fi
+    fi
+
+    # 2) Fallback: ipinfo.io si ip-api no respondio
+    if [[ -z "$label" ]]; then
+        local json
+        json="$(curl -4 -fsSL --connect-timeout 2 --max-time 3 "https://ipinfo.io/${ip}/json" 2>/dev/null || true)"
+        if [[ -n "$json" ]]; then
+            cc="$(printf '%s\n' "$json" | sed -nE 's/.*"country"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -n1)"
+            city="$(printf '%s\n' "$json" | sed -nE 's/.*"city"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -n1)"
+            isp="$(printf '%s\n' "$json" | sed -nE 's/.*"org"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -n1)"
+            if [[ -n "$cc" ]]; then
+                label="$cc"
+                [[ -n "$city" ]] && label="${label}/${city}"
+                [[ -n "$isp" ]]  && label="${label} (${isp})"
+            fi
+        fi
+    fi
+
+    if [[ -z "$label" ]]; then
+        printf '%s\n' "-"
+        return 0
+    fi
+
+    # Sanitizar y truncar a 48 chars para mantener licenses.db compacto
+    label="$(joif_sanitize_alias "$label")"
+    printf '%s\n' "${label:0:48}"
+}
+
+# Formatea bytes a unidad legible (B, KB, MB, GB) sin dependencias externas
+joif_human_bytes() {
+    local b="${1:-0}"
+    [[ "$b" =~ ^[0-9]+$ ]] || { printf '0 B\n'; return 0; }
+    awk -v b="$b" 'BEGIN {
+        if (b >= 1073741824)      printf "%.2f GB\n", b / 1073741824;
+        else if (b >= 1048576)    printf "%.1f MB\n", b / 1048576;
+        else if (b >= 1024)       printf "%.1f KB\n", b / 1024;
+        else                      printf "%d B\n", b;
+    }'
+}
+
 # Carga segura de config.env (sin eval arbitrario)
 joif_load_config() {
     [[ -f "$JOIF_CONFIG_FILE" ]] || return 0
@@ -280,6 +378,7 @@ joif_load_config() {
             UPSTREAM_DNS_4)     JOIF_UPSTREAM_DNS_4="$val" ;;
             INSTALL_DIR)        JOIF_INSTALL_DIR="$val" ;;
             DNSMASQ_FILTER_RR)  JOIF_DNSMASQ_FILTER_RR="$val" ;;
+            ACCESS_LOG)         JOIF_ACCESS_LOG="$val" ;;
         esac
     done < "$JOIF_CONFIG_FILE"
 }
@@ -297,6 +396,7 @@ UPSTREAM_DNS_3="${JOIF_UPSTREAM_DNS_3}"
 UPSTREAM_DNS_4="${JOIF_UPSTREAM_DNS_4}"
 INSTALL_DIR="${JOIF_INSTALL_DIR}"
 DNSMASQ_FILTER_RR="${JOIF_DNSMASQ_FILTER_RR:-auto}"
+ACCESS_LOG="${JOIF_ACCESS_LOG:-on}"
 EOF
     chmod 644 "$tmp"
     mv -f "$tmp" "$JOIF_CONFIG_FILE"
