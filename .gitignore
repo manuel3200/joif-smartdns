@@ -5,3 +5,6 @@
 .DS_Store
 Thumbs.db
 tests/tmp/
+bot/target/
+dist/
+telegram.env

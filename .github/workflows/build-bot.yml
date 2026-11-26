@@ -1,0 +1,68 @@
+name: Build Rust Telegram Bot (static musl)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "bot/**"
+      - ".github/workflows/build-bot.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (musl target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl-tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+
+      - name: Cache Cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            bot/target
+          key: ${{ runner.os }}-cargo-musl-${{ hashFiles('bot/Cargo.toml', 'bot/src/**') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-musl-
+
+      - name: Run unit tests
+        working-directory: bot
+        run: cargo test --verbose
+
+      - name: Build static release binary (x86_64-unknown-linux-musl)
+        working-directory: bot
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Package binary & SHA256 checksum
+        run: |
+          mkdir -p dist
+          cp bot/target/x86_64-unknown-linux-musl/release/joif-tgbot dist/joif-tgbot-linux-x86_64
+          chmod 755 dist/joif-tgbot-linux-x86_64
+          (cd dist && sha256sum joif-tgbot-linux-x86_64 > joif-tgbot-linux-x86_64.sha256)
+          ls -lh dist/
+          cat dist/joif-tgbot-linux-x86_64.sha256
+
+      - name: Publish binary to GitHub Release (bot-latest)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view bot-latest >/dev/null 2>&1; then
+            gh release upload bot-latest dist/joif-tgbot-linux-x86_64 dist/joif-tgbot-linux-x86_64.sha256 --clobber
+            gh release edit bot-latest --notes "Binario estatico Linux x86_64 (musl) de joif-tgbot compilado automaticamente desde commit ${GITHUB_SHA::7}."
+          else
+            gh release create bot-latest dist/joif-tgbot-linux-x86_64 dist/joif-tgbot-linux-x86_64.sha256 \
+              --title "JOIF Smart DNS Telegram Bot (Rust static binary)" \
+              --notes "Binario estatico Linux x86_64 (musl) de joif-tgbot compilado automaticamente desde commit ${GITHUB_SHA::7}."
+          fi

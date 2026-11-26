@@ -907,6 +907,25 @@ assert_contains "${REPO_DIR}/README.md" "docs/GUIA-COMPLETA.md" "README.md enlaz
 assert_contains "${REPO_DIR}/README.md" "manuel3200/joif-smartdns" "README.md apunta al repositorio oficial"
 
 # ------------------------------------------------------------------------------
+# 11. Bot de Telegram en Rust (crate, workflow y gestor core/telegram_bot.sh)
+# ------------------------------------------------------------------------------
+printf '\n=== [11] Bot de Telegram en Rust (joif-tgbot) ===\n'
+
+[[ -f "${REPO_DIR}/bot/Cargo.toml" ]] && pass "bot/Cargo.toml existe" || fail "Falta bot/Cargo.toml"
+[[ -f "${REPO_DIR}/.github/workflows/build-bot.yml" ]] && pass "Workflow .github/workflows/build-bot.yml existe" || fail "Falta workflow build-bot.yml"
+[[ -f "${REPO_DIR}/systemd/joif-smartdns-bot.service" ]] && pass "Unidad systemd joif-smartdns-bot.service existe" || fail "Falta joif-smartdns-bot.service"
+assert_contains "${REPO_DIR}/systemd/joif-smartdns-bot.service" "MemoryMax=32M" "joif-smartdns-bot.service limita RAM a 32M"
+assert_contains "$help_out" "smartdns bot" "menu.sh --help documenta 'smartdns bot'"
+
+# shellcheck source=core/telegram_bot.sh
+source "${REPO_DIR}/core/telegram_bot.sh"
+JOIF_TGBOT_ENV="${TEST_ROOT}/etc/joif-smartdns/telegram.env"
+tgbot_save_env "123456:TESTTOKEN" "987654321" "8.5" "85" >/dev/null
+assert_contains "$JOIF_TGBOT_ENV" 'TELEGRAM_BOT_TOKEN="123456:TESTTOKEN"' "tgbot_save_env guarda token correctamente"
+assert_contains "$JOIF_TGBOT_ENV" 'TELEGRAM_ADMIN_IDS="987654321"' "tgbot_save_env guarda admin ID correctamente"
+assert_contains "$JOIF_TGBOT_ENV" 'TELEGRAM_ALERT_MBPS="8.5"' "tgbot_save_env guarda umbral Mbps"
+
+# ------------------------------------------------------------------------------
 # Resumen final
 # ------------------------------------------------------------------------------
 printf '\n====================================================================\n'

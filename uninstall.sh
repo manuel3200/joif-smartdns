@@ -47,10 +47,11 @@ elif [[ -f "${SCRIPT_DIR}/core/firewall.sh" ]]; then
 fi
 
 # 2. Deshabilitar y eliminar unidades systemd propias
-for unit in joif-smartdns-expire.timer joif-smartdns-expire.service joif-smartdns-firewall.service; do
+for unit in joif-smartdns-bot.service joif-smartdns-expire.timer joif-smartdns-expire.service joif-smartdns-firewall.service; do
     systemctl disable --now "$unit" >/dev/null 2>&1 || true
     rm -f "/etc/systemd/system/${unit}"
 done
+rm -f /usr/local/bin/joif-tgbot
 systemctl daemon-reload >/dev/null 2>&1 || true
 log_ok "Unidades systemd de joif-smartdns eliminadas."
 

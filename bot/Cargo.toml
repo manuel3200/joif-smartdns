@@ -1,0 +1,17 @@
+[package]
+name = "joif-tgbot"
+version = "1.0.0"
+edition = "2021"
+description = "Minimalist Rust Telegram admin & alert bot for joif-smartdns"
+
+[dependencies]
+ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

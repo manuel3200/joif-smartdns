@@ -33,6 +33,8 @@ source "${APP_DIR}/core/maintenance.sh"
 source "${APP_DIR}/core/updater.sh"
 # shellcheck source=core/monitor.sh
 source "${APP_DIR}/core/monitor.sh"
+# shellcheck source=core/telegram_bot.sh
+source "${APP_DIR}/core/telegram_bot.sh"
 
 reload_services_safe() {
     joif_load_config
@@ -482,10 +484,11 @@ menu_maintenance() {
         printf '  6) Restaurar backup previo (seleccion por numero)\n'
         printf '  7) Cambiar IP publica configurada de esta VPS AR\n'
         printf '  8) Reaplicar reglas de firewall (ipset + iptables)\n'
+        printf '  9) Bot de Telegram en Rust (instalar / estado / alertas / logs)\n'
         printf '  0) Volver al menu principal\n\n'
 
         local opt new_ip detected
-        read -r -p "Elige una opcion [0-8]: " opt || return 0
+        read -r -p "Elige una opcion [0-9]: " opt || return 0
         case "$opt" in
             1)
                 if joif_with_lock updater_run; then
@@ -563,6 +566,40 @@ menu_maintenance() {
                 bash "${APP_DIR}/core/firewall.sh" apply || true
                 ui_pause
                 ;;
+            9)
+                menu_telegram_bot
+                ;;
+            0) return 0 ;;
+            *) log_warn "Opcion no valida."; sleep 1 ;;
+        esac
+    done
+}
+
+menu_telegram_bot() {
+    while true; do
+        clear 2>/dev/null || true
+        ui_section_header "Bot de Telegram en Rust (joif-tgbot)" "mantenimiento"
+        tgbot_status
+        printf '  1) Configurar / Instalar Bot de Telegram (Token + tu User ID)\n'
+        printf '  2) Actualizar binario Rust desde GitHub Releases\n'
+        printf '  3) Iniciar / Reiniciar Bot\n'
+        printf '  4) Detener Bot\n'
+        printf '  5) Ver ultimos logs del Bot\n'
+        printf '  6) Eliminar Bot de Telegram\n'
+        printf '  0) Volver\n\n'
+
+        local bopt
+        read -r -p "Elige una opcion [0-6]: " bopt || return 0
+        case "$bopt" in
+            1) tgbot_setup_interactive || true; ui_pause ;;
+            2)
+                tgbot_download_binary && "$JOIF_SYSTEMCTL_BIN" restart "$JOIF_TGBOT_SERVICE" 2>/dev/null || true
+                ui_pause
+                ;;
+            3) "$JOIF_SYSTEMCTL_BIN" restart "$JOIF_TGBOT_SERVICE" && log_ok "Bot reiniciado." || true; ui_pause ;;
+            4) "$JOIF_SYSTEMCTL_BIN" stop "$JOIF_TGBOT_SERVICE" && log_ok "Bot detenido." || true; ui_pause ;;
+            5) journalctl -u "$JOIF_TGBOT_SERVICE" -n 30 --no-pager || true; ui_pause ;;
+            6) tgbot_remove || true; ui_pause ;;
             0) return 0 ;;
             *) log_warn "Opcion no valida."; sleep 1 ;;
         esac
@@ -664,6 +701,7 @@ Comandos CLI disponibles:
   smartdns cleanup [--clear-logs]              Libera cache APT, journald y logs rotados (ideal para VPS 10 GB)
   smartdns backup [archivo.tar.gz]             Crea respaldo liviano (~3 KB) de config, licencias y listas
   smartdns restore <archivo.tar.gz>            Restaura un respaldo previo y recarga servicios
+  smartdns bot <setup|status|update|logs|...>  Gestiona el Bot de Telegram en Rust (joif-tgbot)
   smartdns logs <on|off>                       Activa o desactiva access_log de nginx (ahorro maximo de disco)
   smartdns ip list                             Lista todas las IPs autorizadas con origen Geo/ISP y trafico
   smartdns ip add <ip/cidr> <alias> [dias]     Autoriza nueva IP (dias=0 permanente)
@@ -735,6 +773,10 @@ main() {
         restore)
             joif_require_root
             maintenance_restore "${1:-}"
+            ;;
+        bot)
+            joif_require_root
+            bash "${APP_DIR}/core/telegram_bot.sh" "$@"
             ;;
         logs)
             joif_require_root

@@ -1,0 +1,17 @@
+[Unit]
+Description=JOIF Smart DNS Telegram Admin & Alert Bot (Rust)
+Wants=network-online.target
+After=network-online.target joif-smartdns-firewall.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/joif-smartdns/telegram.env
+ExecStart=/usr/local/bin/joif-tgbot
+Restart=always
+RestartSec=5
+MemoryMax=32M
+CPUQuota=15%
+NoNewPrivileges=no
+
+[Install]
+WantedBy=multi-user.target
