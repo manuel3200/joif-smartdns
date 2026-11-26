@@ -819,7 +819,77 @@ assert_contains "$chk_direct" "[DIRECTO - NO ESTA EN LISTAS AR]" "domains_check_
 help_out="${TEST_ROOT}/menu_help.txt"
 bash "${REPO_DIR}/menu.sh" --help > "$help_out"
 assert_contains "$help_out" "smartdns domains check" "menu.sh --help documenta 'smartdns domains check'"
+assert_contains "$help_out" "smartdns monitor" "menu.sh --help documenta 'smartdns monitor'"
+assert_contains "$help_out" "smartdns discover" "menu.sh --help documenta 'smartdns discover'"
 assert_contains "$help_out" "docs/GUIA-COMPLETA.md" "menu.sh --help incluye enlace directo a la guia en GitHub"
+
+# ------------------------------------------------------------------------------
+# 9. Fase 3: Monitor SNI formateado y Asistente "Descubrir dominios de una app"
+# ------------------------------------------------------------------------------
+printf '\n=== [9] Fase 3: Monitor SNI y Descubridor de dominios de apps ===\n'
+
+# shellcheck source=core/monitor.sh
+source "${REPO_DIR}/core/monitor.sh"
+
+# 9.1 Filtro inteligente de ruido Android/Google/Meta/OEM/CDNs
+monitor_is_noise_domain "graph.facebook.com"            && pass "Filtro oculta ruido Meta (graph.facebook.com)" || fail "No filtro facebook"
+monitor_is_noise_domain "play.googleapis.com"           && pass "Filtro oculta ruido Google (play.googleapis.com)" || fail "No filtro googleapis"
+monitor_is_noise_domain "d231v1wfkp86y7.cloudfront.net" && pass "Filtro oculta CDN generico (cloudfront.net)" || fail "No filtro cloudfront"
+monitor_is_noise_domain "ota-checker.transsion-os.com"  && pass "Filtro oculta ruido OEM (transsion-os.com)" || fail "No filtro transsion-os"
+! monitor_is_noise_domain "api.transfers.prod.personalpay.dev" && pass "Filtro conserva dominio real de fintech (personalpay.dev)" || fail "Filtro incorrectamente personalpay.dev"
+! monitor_is_noise_domain "api.miappbancaria.com.ar"    && pass "Filtro conserva dominio argentino nuevo" || fail "Filtro incorrectamente miappbancaria.com.ar"
+
+# 9.2 Sugerencia de dominio base respetando ccTLDs compuestos (.com.ar, .gob.ar, .com.br)
+assert_eq "personalpay.dev"   "$(monitor_suggest_base_domain "api.transfers.prod.personalpay.dev")" "suggest_base extrae personalpay.dev"
+assert_eq "paygilant.com"     "$(monitor_suggest_base_domain "api-prod-us.paygilant.com")"          "suggest_base extrae paygilant.com"
+assert_eq "bna.com.ar"        "$(monitor_suggest_base_domain "homebanking.bna.com.ar")"             "suggest_base respeta .com.ar (no recorta a com.ar)"
+assert_eq "miargentina.gob.ar" "$(monitor_suggest_base_domain "auth.miargentina.gob.ar")"           "suggest_base respeta .gob.ar (no recorta a gob.ar)"
+
+# 9.3 Parser real de salida tcpdump puerto 53 + agrupacion de candidatos NUEVOS
+tcpdump_sample="${TEST_ROOT}/tcpdump_sample.log"
+cat > "$tcpdump_sample" <<'EOF'
+16:47:03.654224 eth0  In  IP 144.22.167.150.56363 > 192.168.192.33.53: 26588+ A? graph.facebook.com. (36)
+16:47:03.674745 eth0  Out IP 192.168.192.33.53 > 144.22.167.150.56363: 26588 2/0/0 CNAME star.c10r.facebook.com., A 57.144.206.141 (76)
+16:47:25.522453 eth0  In  IP 144.22.167.150.34727 > 192.168.192.33.53: 3931+ A? api.transfers.prod.personalpay.dev. (63)
+16:47:26.451045 eth0  In  IP 144.22.167.150.37359 > 192.168.192.33.53: 32064+ A? api.nuevabilletera.com.ar. (43)
+16:47:26.886774 eth0  In  IP 144.22.167.150.46726 > 192.168.192.33.53: 46598+ A? auth.nuevabilletera.com.ar. (50)
+16:47:27.000000 eth0  In  IP 144.22.167.150.46727 > 192.168.192.33.53: 46599+ A? www.netflix.com. (35)
+16:47:27.100000 eth0  In  IP 144.22.167.150.46728 > 192.168.192.33.53: 46600+ A? ota-checker.transsion-os.com. (46)
+16:47:27.200000 eth0  In  IP 144.22.167.150.46729 > 192.168.192.33.53: 46601+ A? d231v1wfkp86y7.cloudfront.net. (47)
+EOF
+
+parsed_dns="${TEST_ROOT}/parsed_dns.txt"
+monitor_parse_tcpdump_dns < "$tcpdump_sample" > "$parsed_dns"
+
+assert_contains "$parsed_dns" "AR|personalpay.dev|api.transfers.prod.personalpay.dev" "tcpdump parser clasifica dominio activo como AR"
+assert_contains "$parsed_dns" "PAUSADA|netflix.com|www.netflix.com" "tcpdump parser clasifica dominio en categoria pausada como PAUSADA"
+assert_contains "$parsed_dns" "NUEVO|nuevabilletera.com.ar|api.nuevabilletera.com.ar" "tcpdump parser detecta dominio nuevo y sugiere base .com.ar"
+assert_not_contains "$parsed_dns" "facebook.com" "tcpdump parser descarta ruido de Facebook"
+assert_not_contains "$parsed_dns" "transsion-os.com" "tcpdump parser descarta ruido de Transsion"
+assert_not_contains "$parsed_dns" "cloudfront.net" "tcpdump parser descarta CDN generico"
+
+cand_out="${TEST_ROOT}/candidates.txt"
+monitor_summarize_new_candidates < "$parsed_dns" > "$cand_out"
+assert_contains "$cand_out" "nuevabilletera.com.ar|2|api.nuevabilletera.com.ar" "summarize agrupa subdominios de nuevabilletera.com.ar con conteo=2"
+
+# 9.4 Formateador de log SNI en vivo (alias + [OK]/[BLK] + bytes + excluye 127.0.0.1 + <=74 cols)
+sni_fmt="${TEST_ROOT}/sni_formatted.txt"
+cat <<'EOF' | monitor_sni_format_stream > "$sni_fmt"
+127.0.0.1 [26/Nov/2026:16:10:00 +0000] sni="mercadopago.com.ar" allowed=1 target="mercadopago.com.ar:443" status=200 sent=1000 recv=100 time=0.05
+144.22.167.150 [26/Nov/2026:16:55:53 +0000] sni="api.transfers.prod.personalpay.dev" allowed=1 target="api.transfers.prod.personalpay.dev:443" status=200 sent=106984 recv=64376 time=35.873
+144.22.167.150 [26/Nov/2026:16:55:54 +0000] sni="example.com" allowed=0 target="127.0.0.1:18443" status=200 sent=0 recv=0 time=0.001
+EOF
+
+assert_not_contains "$sni_fmt" "127.0.0.1" "monitor_sni_format_stream excluye pruebas locales 127.0.0.1 por defecto"
+assert_contains "$sni_fmt" "16:55:53 [OK]" "monitor_sni_format_stream muestra hora y badge [OK]"
+assert_contains "$sni_fmt" "Nodo Brasil 01" "monitor_sni_format_stream traduce IP de origen al alias de licenses.db"
+assert_contains "$sni_fmt" "16:55:54 [BLK]" "monitor_sni_format_stream muestra badge [BLK] para SNI rechazados"
+sni_max_w="$(awk '{if(length($0)>m) m=length($0)} END{print m+0}' "$sni_fmt")"
+if (( sni_max_w <= 74 )); then
+    pass "monitor_sni_format_stream mantiene ancho <= 74 cols (max=${sni_max_w})"
+else
+    fail "monitor_sni_format_stream excedio 74 cols (max=${sni_max_w})"
+fi
 
 # ------------------------------------------------------------------------------
 # Resumen final

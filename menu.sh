@@ -31,6 +31,8 @@ source "${APP_DIR}/core/metrics.sh"
 source "${APP_DIR}/core/maintenance.sh"
 # shellcheck source=core/updater.sh
 source "${APP_DIR}/core/updater.sh"
+# shellcheck source=core/monitor.sh
+source "${APP_DIR}/core/monitor.sh"
 
 reload_services_safe() {
     joif_load_config
@@ -439,37 +441,24 @@ menu_manage_domains() {
 menu_diagnostics_and_logs() {
     while true; do
         clear 2>/dev/null || true
-        ui_section_header "Diagnostico, Metricas y Logs" "diagnostico"
+        ui_section_header "Diagnostico, Metricas y Monitores en Vivo" "diagnostico"
         printf '  1) Diagnostico integral en vivo (DNS + Anti-fuga + SNI + Firewall)\n'
         printf '  2) Metricas en vivo: Mbps, disco/RAM, origen por IP y Top dominios\n'
-        printf '  3) Ver ultimas 25 conexiones SNI (puerto 443)\n'
-        printf '  4) Seguir conexiones SNI en tiempo real (Ctrl+C vuelve al menu)\n'
-        printf '  5) Ver estado detallado de ipset e iptables\n'
+        printf '  3) Ver ultimas 25 conexiones SNI (formateado con alias y trafico)\n'
+        printf '  4) Monitor SNI en tiempo real (colores, Ctrl+C vuelve al menu)\n'
+        printf '  5) Descubrir dominios de una app (asistente DNS sin ruido Android)\n'
+        printf '  6) Ver estado detallado de ipset e iptables\n'
         printf '  0) Volver al menu principal\n\n'
 
         local opt
-        read -r -p "Elige una opcion [0-5]: " opt || return 0
+        read -r -p "Elige una opcion [0-6]: " opt || return 0
         case "$opt" in
             1) diagnostics_run; ui_pause ;;
             2) metrics_print_report; ui_pause ;;
-            3)
-                if [[ -f "${JOIF_NGINX_LOG_DIR}/joif-smartdns-stream.log" ]]; then
-                    tail -n 25 "${JOIF_NGINX_LOG_DIR}/joif-smartdns-stream.log"
-                else
-                    log_info "Aun no hay registros en ${JOIF_NGINX_LOG_DIR}/joif-smartdns-stream.log."
-                fi
-                ui_pause
-                ;;
-            4)
-                if [[ -f "${JOIF_NGINX_LOG_DIR}/joif-smartdns-stream.log" ]]; then
-                    log_info "Mostrando conexiones SNI en vivo (presiona Ctrl+C para volver al menu)..."
-                    ui_run_interruptible tail -f "${JOIF_NGINX_LOG_DIR}/joif-smartdns-stream.log"
-                else
-                    log_info "Aun no existe ${JOIF_NGINX_LOG_DIR}/joif-smartdns-stream.log."
-                fi
-                ui_pause
-                ;;
-            5)
+            3) monitor_sni_recent 25; ui_pause ;;
+            4) monitor_sni_live || true; ui_pause ;;
+            5) monitor_discover_interactive || true; ui_pause ;;
+            6)
                 bash "${APP_DIR}/core/firewall.sh" status || true
                 ui_pause
                 ;;
@@ -667,6 +656,8 @@ Guia oficial: ${JOIF_DOCS_URL}
 Comandos CLI disponibles:
   smartdns status                              Ejecuta diagnostico completo en vivo
   smartdns metrics                             Muestra Mbps en vivo, disco/RAM, origen/trafico por IP y top dominios
+  smartdns monitor                             Monitor SNI en tiempo real (formateado con alias y colores)
+  smartdns discover [ip] [segundos]            Asistente DNS para descubrir dominios nuevos de una app
   smartdns reload                              Regenera y valida dnsmasq + nginx con rollback
   smartdns sync-licenses                       Purga licencias vencidas y sincroniza ipset
   smartdns update [--no-lists]                 Actualiza joif-smartdns desde GitHub conservando licencias y config
@@ -712,6 +703,14 @@ main() {
         metrics)
             joif_require_root
             metrics_print_report
+            ;;
+        monitor)
+            joif_require_root
+            monitor_sni_live
+            ;;
+        discover)
+            joif_require_root
+            monitor_discover_interactive "${1:-}" "${2:-}"
             ;;
         reload)
             joif_require_root

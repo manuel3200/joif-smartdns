@@ -136,6 +136,7 @@ install_packages() {
         dnsutils \
         curl \
         openssl \
+        tcpdump \
         ca-certificates
 
     # Evitar que /etc/default/dnsmasq o resolvconf inyecten resolvers locales
