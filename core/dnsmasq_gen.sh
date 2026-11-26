@@ -41,7 +41,7 @@ dnsmasq_supports_filter_rr() {
         probe_tmp="$(mktemp)"
         cat > "$probe_tmp" <<'EOF'
 no-resolv
-filter-rr=HTTPS,SVCB
+filter-rr=AAAA,HTTPS,SVCB
 EOF
         if "$JOIF_DNSMASQ_BIN" --test --conf-file="$probe_tmp" >/dev/null 2>&1; then
             rm -f "$probe_tmp"
@@ -127,9 +127,9 @@ EOF
         if [[ "$filter_rr_enabled" == "yes" ]]; then
             cat <<'EOF'
 
-# Anti-fuga HTTPS/SVCB (Tipo 65/64): evita que Android/Chrome use ipv4hint/ECH
+# Anti-fuga IPv6 (AAAA) y HTTPS/SVCB (Tipo 65/64): evita que Android/Chrome use IPv6/ipv4hint/ECH
 # y salte el Smart DNS hacia la IP real del proveedor
-filter-rr=HTTPS,SVCB
+filter-rr=AAAA,HTTPS,SVCB
 EOF
         else
             cat <<EOF
