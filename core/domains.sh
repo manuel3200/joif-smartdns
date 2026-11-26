@@ -207,6 +207,113 @@ domains_custom_remove() {
     log_ok "Dominio '${norm}' eliminado de 99-custom.list."
 }
 
+# Extrae hostname limpio incluso si el usuario pega una URL completa (ej. https://api.brubank.com.ar/v1)
+domains_extract_host() {
+    local raw="${1:-}"
+    raw="${raw//$'\r'/}"
+    raw="${raw#"${raw%%[![:space:]]*}"}"
+    raw="${raw%"${raw##*[![:space:]]}"}"
+    raw="${raw#http://}"
+    raw="${raw#https://}"
+    raw="${raw%%/*}"
+    raw="${raw%%\?*}"
+    raw="${raw%%:*}"
+    joif_normalize_domain "$raw"
+}
+
+# Busca si un dominio o cualquiera de sus dominios padre esta en alguna lista (activa o desactivada)
+# Salida: regla_coincidente|categoria_slug|estado|ruta_archivo (retorna 1 si no coincide con ninguna)
+domains_find_match() {
+    local host
+    host="$(domains_extract_host "${1:-}")" || return 1
+    [[ -d "$JOIF_DOMAINS_DIR" ]] || return 1
+
+    # Primero buscar en listas activas (*.list), luego en pausadas (*.list.disabled)
+    local f base slug status rule
+    shopt -s nullglob
+    for f in "${JOIF_DOMAINS_DIR}"/*.list "${JOIF_DOMAINS_DIR}"/*.list.disabled; do
+        [[ -f "$f" ]] || continue
+        base="$(basename "$f")"
+        if [[ "$base" == *.list.disabled ]]; then
+            slug="${base%.list.disabled}"
+            status="desactivada"
+        else
+            slug="${base%.list}"
+            status="activa"
+        fi
+
+        while IFS= read -r rule; do
+            [[ -z "$rule" ]] && continue
+            if [[ "$host" == "$rule" || "$host" == *".${rule}" ]]; then
+                shopt -u nullglob
+                printf '%s|%s|%s|%s\n' "$rule" "$slug" "$status" "$f"
+                return 0
+            fi
+        done < <(domains_parse_file "$f" 2>/dev/null)
+    done
+    shopt -u nullglob
+    return 1
+}
+
+# Diagnostico puntual de un dominio: lista coincidente + prueba DNS local + prueba SNI 443
+domains_check_live() {
+    local raw="${1:-}"
+    local host
+    if ! host="$(domains_extract_host "$raw")"; then
+        log_error "Dominio invalido: '${raw}'. Ejemplo: api.brubank.com.ar"
+        return 1
+    fi
+
+    joif_load_config
+    local pub_ip="${JOIF_PUBLIC_IP:-}"
+
+    printf '\n%b--- Consulta de Dominio: %s ---%b\n' "$C_BOLD" "$host" "$C_RESET"
+
+    local match="" rule="" slug="" status="" path="" label=""
+    if match="$(domains_find_match "$host")"; then
+        IFS='|' read -r rule slug status path <<< "$match"
+        label="$(domains_category_label "$slug")"
+        if [[ "$status" == "activa" ]]; then
+            printf '  Ruta Smart DNS : %b[AR - INTERCEPTADO]%b\n' "$C_GREEN" "$C_RESET"
+        else
+            printf '  Ruta Smart DNS : %b[PAUSADA - SALE DIRECTO]%b\n' "$C_YELLOW" "$C_RESET"
+        fi
+        printf '  Regla          : %s (categoria: %s — %s)\n' "$rule" "$slug" "$label"
+    else
+        printf '  Ruta Smart DNS : %b[DIRECTO - NO ESTA EN LISTAS AR]%b\n' "$C_CYAN" "$C_RESET"
+        printf '  Detalle        : Sale directo por tu VPS de Brasil/USA sin consumir ancho de banda en AR.\n'
+    fi
+
+    # Pruebas en vivo contra dnsmasq local si dig esta disponible
+    if command -v dig >/dev/null 2>&1; then
+        local ans_a ans_aaaa ans_t65
+        ans_a="$(dig +short +time=2 +tries=1 @127.0.0.1 "$host" A 2>/dev/null | head -n1 || true)"
+        ans_aaaa="$(dig +short +time=2 +tries=1 @127.0.0.1 "$host" AAAA 2>/dev/null | head -n1 || true)"
+        ans_t65="$(dig +short +time=2 +tries=1 @127.0.0.1 "$host" TYPE65 2>/dev/null | head -n1 || true)"
+        printf '  DNS local (A)  : %s\n' "${ans_a:-sin respuesta}"
+        printf '  DNS local AAAA : %s\n' "${ans_aaaa:-vacio (OK, sin fuga IPv6)}"
+        printf '  DNS TYPE65     : %s\n' "${ans_t65:-vacio (OK, sin fuga HTTPS/SVCB)}"
+        if [[ "$status" == "activa" && -n "$pub_ip" && "$ans_a" != "$pub_ip" ]]; then
+            log_warn "El dominio figura en lista activa, pero dnsmasq devolvio '${ans_a:-vacio}'. Ejecuta 'smartdns reload'."
+        fi
+    fi
+
+    # Prueba SNI passthrough en 127.0.0.1:443 si esta interceptado y openssl existe
+    if [[ "$status" == "activa" ]] && command -v openssl >/dev/null 2>&1 && [[ "${JOIF_SKIP_SERVICE_RELOAD:-0}" != "1" ]]; then
+        local sni_out subj
+        sni_out="$(timeout 5 openssl s_client -connect 127.0.0.1:443 -servername "$host" </dev/null 2>&1 || true)"
+        subj="$(printf '%s\n' "$sni_out" | grep -m1 '^subject=' || true)"
+        if [[ -n "$subj" ]]; then
+            printf '  SNI Proxy 443  : %bOK%b (%s)\n' "$C_GREEN" "$C_RESET" "$subj"
+        else
+            printf '  SNI Proxy 443  : %bSin respuesta TLS en 127.0.0.1:443%b\n' "$C_YELLOW" "$C_RESET"
+        fi
+    fi
+
+    printf '\n'
+    [[ -n "$match" ]] && return 0 || return 2
+}
+
 # Ejecucion directa CLI opcional
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     set -euo pipefail
@@ -220,8 +327,10 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
         toggle)  domains_toggle_category "${1:-}" ;;
         add)     domains_custom_add "${1:-}" ;;
         remove)  domains_custom_remove "${1:-}" ;;
+        match)   domains_find_match "${1:-}" ;;
+        check)   domains_check_live "${1:-}" ;;
         *)
-            echo "Uso: $0 {list|active|enable|disable|toggle|add|remove} [arg]" >&2
+            echo "Uso: $0 {list|active|enable|disable|toggle|add|remove|match|check} [arg]" >&2
             exit 1
             ;;
     esac

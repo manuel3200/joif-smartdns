@@ -755,6 +755,65 @@ assert_contains "$JOIF_LICENSES_DB" "144.22.167.150/32|Nodo Brasil 01|" "updater
 [[ -x "${UPD_INSTALL}/core/updater.sh" ]] && pass "updater despliega scripts ejecutables en JOIF_INSTALL_DIR sin requerir .git" || fail "updater no desplego scripts"
 
 # ------------------------------------------------------------------------------
+# 8. Fase 2: UI compacta (UTF-8 / ASCII <=74 cols) y buscador/probador de dominios
+# ------------------------------------------------------------------------------
+printf '\n=== [8] Fase 2: UI compacta y buscador/probador de dominios ===\n'
+
+# shellcheck source=core/ui.sh
+source "${REPO_DIR}/core/ui.sh"
+
+# Probar modo ASCII fallback (terminales sin UTF-8) y ancho maximo <= 74 cols
+ascii_box="${TEST_ROOT}/ui_ascii.txt"
+(
+    JOIF_UI_ASCII=1 ui_init_charset
+    ui_box_top
+    ui_box_title "JOIF SMART DNS v1.2.0 — Prueba de caja compacta para celular SSH"
+    ui_box_row "Linea extremadamente larga que deberia recortarse automaticamente para nunca romper el ancho de 74 columnas en moviles"
+    ui_box_bottom
+) > "$ascii_box"
+
+assert_contains "$ascii_box" "+--------" "UI modo ASCII genera bordes seguros (+---)"
+max_w="$(awk '{if(length($0)>m) m=length($0)} END{print m+0}' "$ascii_box")"
+if (( max_w <= 74 )); then
+    pass "UI mantiene ancho maximo <= 74 columnas para celular (max=${max_w})"
+else
+    fail "UI excedio 74 columnas (max=${max_w})"
+fi
+
+# Probar domains_extract_host (URLs completas -> dominio limpio)
+assert_eq "api.brubank.com.ar" "$(domains_extract_host "https://API.BRUBANK.COM.AR:443/v1/transfer?foo=1")" "domains_extract_host limpia URL completa con puerto y ruta"
+
+# Probar domains_find_match (subdominio -> regla padre activa, pausada y no cubierto)
+match_active="$(domains_find_match "api.transfers.prod.personalpay.dev")"
+assert_eq "personalpay.dev|01-fintech-bancos|activa" "${match_active%|*}" "domains_find_match detecta subdominio de personalpay.dev en categoria activa"
+
+match_paused="$(domains_find_match "www.netflix.com")"
+assert_eq "netflix.com|03-streaming-ar|desactivada" "${match_paused%|*}" "domains_find_match detecta subdominio en categoria pausada"
+
+! domains_find_match "youtube.com" >/dev/null 2>&1 && pass "domains_find_match retorna no-match para youtube.com" || fail "youtube.com no deberia estar interceptado"
+
+# Probar domains_check_live salida y codigos de retorno
+chk_ar="${TEST_ROOT}/chk_ar.txt"
+domains_check_live "https://api.transfers.prod.personalpay.dev/ping" > "$chk_ar"
+assert_contains "$chk_ar" "[AR - INTERCEPTADO]" "domains_check_live marca personalpay.dev como [AR - INTERCEPTADO]"
+
+chk_paused="${TEST_ROOT}/chk_paused.txt"
+domains_check_live "www.netflix.com" > "$chk_paused"
+assert_contains "$chk_paused" "[PAUSADA - SALE DIRECTO]" "domains_check_live marca categoria pausada correctamente"
+
+chk_direct="${TEST_ROOT}/chk_direct.txt"
+rc=0
+domains_check_live "youtube.com" > "$chk_direct" || rc=$?
+assert_eq "2" "$rc" "domains_check_live retorna codigo 2 cuando dominio no esta en listas AR"
+assert_contains "$chk_direct" "[DIRECTO - NO ESTA EN LISTAS AR]" "domains_check_live informa salida directa por Brasil/USA"
+
+# Probar que menu.sh --help incluye nuevos comandos y enlace a la guia
+help_out="${TEST_ROOT}/menu_help.txt"
+bash "${REPO_DIR}/menu.sh" --help > "$help_out"
+assert_contains "$help_out" "smartdns domains check" "menu.sh --help documenta 'smartdns domains check'"
+assert_contains "$help_out" "docs/GUIA-COMPLETA.md" "menu.sh --help incluye enlace directo a la guia en GitHub"
+
+# ------------------------------------------------------------------------------
 # Resumen final
 # ------------------------------------------------------------------------------
 printf '\n====================================================================\n'
