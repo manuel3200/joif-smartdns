@@ -95,10 +95,10 @@ ui_section_header() {
     printf '\n'
     ui_box_top
     ui_box_title "$title"
-    if [[ -n "$anchor" ]]; then
-        ui_box_row "Guia: ${JOIF_DOCS_URL}#${anchor}"
-    fi
     ui_box_bottom
+    if [[ -n "$anchor" ]]; then
+        printf '  %bGuia:%b\n  %s#%s\n' "$C_DIM" "$C_RESET" "$JOIF_DOCS_URL" "$anchor"
+    fi
     printf '\n'
 }
 

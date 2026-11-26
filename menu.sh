@@ -629,7 +629,7 @@ interactive_loop() {
         printf '  %b5)%b Ayuda Rapida y Guia Oficial en GitHub\n' "$C_CYAN" "$C_RESET"
         printf '  %b6)%b Desinstalar joif-smartdns\n' "$C_RED" "$C_RESET"
         printf '  %b0)%b Salir\n\n' "$C_DIM" "$C_RESET"
-        printf '  %bGuia:%b %s\n\n' "$C_DIM" "$C_RESET" "$JOIF_DOCS_URL"
+        printf '  %bGuia oficial:%b\n  %s\n\n' "$C_DIM" "$C_RESET" "$JOIF_DOCS_URL"
 
         local choice
         read -r -p "Elige una opcion [0-6]: " choice || exit 0
