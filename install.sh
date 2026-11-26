@@ -219,7 +219,7 @@ install_systemd_units() {
               /etc/systemd/system/joif-smartdns-expire.timer
 
     systemctl daemon-reload
-    systemctl enable joif-smartdns-firewall.service
+    systemctl enable --now joif-smartdns-firewall.service
     systemctl enable --now joif-smartdns-expire.timer
     log_ok "Unidades systemd habilitadas (arranque automatico y purga horaria de licencias)."
 }
@@ -315,7 +315,7 @@ main() {
     # Inicializar licencias, systemd y firewall seguro (NUNCA toca SSH 22)
     setup_initial_license
     install_systemd_units
-    bash "${JOIF_INSTALL_DIR}/core/firewall.sh" apply
+    systemctl restart joif-smartdns-firewall.service
 
     # Ejecutar diagnostico final
     bash "${JOIF_INSTALL_DIR}/core/diagnostics.sh" || true
