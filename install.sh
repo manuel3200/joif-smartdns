@@ -329,11 +329,14 @@ main() {
     bash "${JOIF_INSTALL_DIR}/core/diagnostics.sh" || true
 
     printf '%b====================================================================%b\n' "$C_GREEN" "$C_RESET"
-    printf '%b  Instalacion completada con exito!%b\n' "$C_BOLD" "$C_RESET"
+    printf '%b  Instalacion completada con exito! (v%s)%b\n' "$C_BOLD" "$JOIF_VERSION" "$C_RESET"
     printf '  - IP DNS Primaria (VPS AR) : %s\n' "$JOIF_PUBLIC_IP"
-    printf '  - Panel administrativo     : sudo smartdns\n'
-    printf '  - Diagnostico rapido       : sudo smartdns status\n'
-    printf '  - Autorizar VPS Brasil/USA : sudo smartdns ip add <IP_VPS> "Nodo Brasil 01" 0\n'
+    printf '  - Panel visual interactivo : sudo smartdns\n'
+    printf '  - Diagnostico / Metricas   : sudo smartdns status  |  sudo smartdns metrics\n'
+    printf '  - Guia completa en GitHub  : %s\n' "$JOIF_DOCS_URL"
+    printf '\n%b  Siguiente paso para conectar tu VPS de Brasil / USA:%b\n' "$C_CYAN" "$C_RESET"
+    printf '  1) Aqui (VPS AR)  : sudo smartdns ip add <IP_VPS_BRASIL> "Nodo Brasil 01" 0\n'
+    printf '  2) En VPS Brasil  : dig +short @%s mercadopago.com.ar A\n' "$JOIF_PUBLIC_IP"
     printf '%b====================================================================%b\n\n' "$C_GREEN" "$C_RESET"
 }
 

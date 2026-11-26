@@ -892,6 +892,21 @@ else
 fi
 
 # ------------------------------------------------------------------------------
+# 10. Fase 4: Documentacion docs/GUIA-COMPLETA.md y verificacion de anclas #
+# ------------------------------------------------------------------------------
+printf '\n=== [10] Fase 4: Documentacion y anclas enlazadas desde el script ===\n'
+
+GUIDE_FILE="${REPO_DIR}/docs/GUIA-COMPLETA.md"
+[[ -f "$GUIDE_FILE" ]] && pass "docs/GUIA-COMPLETA.md existe" || fail "Falta docs/GUIA-COMPLETA.md"
+
+for anchor in instalacion conectar-vps-vpn licencias-ip dominios diagnostico descubrir-apps mantenimiento limitaciones desinstalacion; do
+    assert_contains "$GUIDE_FILE" "<a id=\"${anchor}\"></a>" "GUIA-COMPLETA.md contiene ancla #${anchor}"
+done
+
+assert_contains "${REPO_DIR}/README.md" "docs/GUIA-COMPLETA.md" "README.md enlaza a docs/GUIA-COMPLETA.md"
+assert_contains "${REPO_DIR}/README.md" "manuel3200/joif-smartdns" "README.md apunta al repositorio oficial"
+
+# ------------------------------------------------------------------------------
 # Resumen final
 # ------------------------------------------------------------------------------
 printf '\n====================================================================\n'

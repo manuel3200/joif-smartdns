@@ -4,7 +4,7 @@
 [[ -n "${JOIF_COMMON_LOADED:-}" ]] && return 0
 JOIF_COMMON_LOADED=1
 
-JOIF_VERSION="1.3.0"
+JOIF_VERSION="1.4.0"
 JOIF_REPO_URL="${JOIF_REPO_URL:-https://github.com/manuel3200/joif-smartdns.git}"
 JOIF_DOCS_URL="${JOIF_DOCS_URL:-https://github.com/manuel3200/joif-smartdns/blob/main/docs/GUIA-COMPLETA.md}"
 

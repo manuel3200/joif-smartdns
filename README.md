@@ -1,63 +1,97 @@
 # joif-smartdns
 
-Servidor **Smart DNS + SNI Proxy Argentino** con sistema de **licencias por IP/CIDR** diseñado para el ecosistema **JOIF VPN** y compatible con **Ubuntu 22.04, 24.04 y 26.04 LTS**.
+Servidor **Smart DNS + SNI Proxy Argentino** (`dnsmasq` + `nginx ssl_preread`) con **licencias por IP/CIDR**, métricas livianas, asistente descubridor de dominios de apps y protección de disco para VPS de 10 GB.
 
-## Cómo funciona en el ecosistema JOIF VPN
+Compatible con **Ubuntu 22.04, 24.04 y 26.04 LTS** (incluyendo VPS con **NAT 1:1 / DHCP**).
 
-```text
-[App Android JOIF (Zeptun / HevSocks5)]
-          │  Túnel VPN/SSH de alto ancho de banda
-          ▼
-[VPS Principal Brasil / USA (ej. br1.joif.net)]
-          │
-          ├── ~95% tráfico normal (YouTube, TikTok, gaming, descargas)
-          │        └─► Resuelto via 1.1.1.1/8.8.8.8 ─► Sale directo por Brasil/USA
-          │
-          └── ~5% dominios geo-restringidos AR (Mercado Pago, bancos, .gob.ar, streaming AR)
-                   ├─► DNS (53/udp+tcp) ─► VPS Argentina (dnsmasq) devuelve IP pública VPS AR
-                   │                        (A = IP AR, AAAA = NODATA, HTTPS/SVCB filtrado)
-                   └─► TLS/HTTP (443/80) ─► VPS Argentina (nginx ssl_preread)
-                                            Reenvío transparente extremo a extremo SIN descifrar TLS
+> **Manual completo paso a paso:** [docs/GUIA-COMPLETA.md](docs/GUIA-COMPLETA.md)
+
+---
+
+## Instalación rápida (1 sola línea en tu VPS Argentina)
+
+```bash
+sudo apt-get update -qq && sudo apt-get install -y -qq git && git clone https://github.com/manuel3200/joif-smartdns.git && cd joif-smartdns && sudo ./install.sh
 ```
 
-## Características principales
+Luego abrí el panel visual interactivo (adaptado a PC y celular SSH):
 
-- **Motor DNS Selectivo (`dnsmasq` puerto 53 TCP/UDP):**
-  - Libera el puerto 53 de forma segura mediante `/etc/systemd/resolved.conf.d/99-joif-smartdns.conf` (`DNSStubListener=no`) y deja `/etc/resolv.conf` del propio host apuntando a `1.1.1.1` / `8.8.8.8`.
-  - **Anti-fuga IPv6 y HTTPS/SVCB:** los dominios interceptados devuelven `A = <IP_VPS_AR>` y `AAAA = NODATA`, y en `dnsmasq` con soporte (`>= 2.90` en Ubuntu 24.04/26.04 o builds parcheadas `>= 2.87`, detectado dinámicamente con `--test`) habilita `filter-rr=HTTPS,SVCB` para evitar fugas por `ipv4hint`/`ECH`.
-- **Proxy Transparente TLS/HTTP (`nginx` + `libnginx-mod-stream`):**
-  - Usa `ngx_stream_ssl_preread_module` oficial (sin depender del antiguo `sniproxy`).
-  - **Puerto 443 (`stream`):** lee únicamente `$ssl_preread_server_name` sin terminar ni descifrar TLS; los certificados originales de bancos, Mercado Pago, Mi Argentina y Netflix llegan intactos al dispositivo.
-  - **Puerto 80 (`http`):** reenvía por cabecera `$host` validada hacia puerto 80 con resolver externo (`1.1.1.1` / `8.8.8.8`, nunca `127.0.0.1`).
-  - **Anti-abuso estricto:** solo permite dominios de las listas habilitadas; SNI vacío o dominios fuera de lista se rechazan localmente (`127.0.0.1:18443` `deny all` en 443 y `return 444` en 80).
-- **Licencias por IP/CIDR + Firewall seguro (`ipset` + `iptables` + `systemd`):**
-  - Whitelist en `ipset joif_smartdns_allow` (`hash:net`) con recarga atómica (`swap`, cero cortes).
-  - Cadena dedicada `JOIF_SMARTDNS` (y bloqueo IPv6 `JOIF_SMARTDNS6`) aplicada **exclusivamente** a `53/udp`, `53/tcp`, `80/tcp` y `443/tcp`. **Nunca modifica ni bloquea SSH (`22/tcp`).**
-  - Persistencia tras reinicios vía `joif-smartdns-firewall.service` y purga horaria automática de licencias vencidas vía `joif-smartdns-expire.timer`.
-- **Listas modulares de dominios argentinos (`/etc/joif-smartdns/domains.d/`):**
-  - `01-fintech-bancos.list`: Mercado Pago/Libre, Ualá, Brubank, Naranja X, MODO, Personal Pay, Prex, Lemon, Belo, Ripio, BNA, Banco Provincia/Cuenta DNI, Galicia, Santander, BBVA, Macro, Link, Banelco/Prisma, etc.
-  - `02-gobierno-ar.list`: `argentina.gob.ar`, `miargentina.gob.ar`, `afip.gob.ar`, `arca.gob.ar`, `anses.gob.ar`, `renaper.gob.ar`, `pami.org.ar`, `buenosaires.gob.ar`, `gba.gob.ar`, etc.
-  - `03-streaming-ar.list`: Netflix, Flow, TyC Sports Play, Telefe, El Trece, DGO, Disney+, Max, Prime Video.
-  - `99-custom.list`: dominios personalizados agregados por el administrador.
-- **Panel CLI (`smartdns`) con validación previa y rollback automático:**
-  - Antes de aplicar cambios ejecuta `dnsmasq --test` y `nginx -t`; si algo falla, restaura automáticamente la configuración anterior.
+```bash
+sudo smartdns
+```
 
-## Estructura del proyecto
+---
+
+## Cómo funciona (resumen en 10 segundos)
+
+- **~95% del tráfico normal** (YouTube, TikTok, WhatsApp, gaming, descargas) resuelve normal por `1.1.1.1`/`8.8.8.8` y sale directo por tu VPS de Brasil/USA sin consumir ancho de banda en Argentina.
+- **~5% de dominios argentinos** (Mercado Pago, billeteras, bancos, `.gob.ar`, streaming AR) resuelven a la IP pública de tu VPS AR (bloqueando fugas `AAAA` y `HTTPS/SVCB`) y pasan por `nginx stream` (`ssl_preread`) **sin descifrar TLS** (certificados originales intactos).
+- **Seguridad:** solo IPs autorizadas en `ipset joif_smartdns_allow` (con vencimiento horario automático) acceden a `53/80/443`. **El puerto SSH (`22/tcp`) jamás se toca.**
+
+---
+
+## Comandos principales (`smartdns`)
+
+| Comando | Qué hace |
+| :--- | :--- |
+| `sudo smartdns` | Abre el panel visual interactivo (dashboard + menús numerados) |
+| `sudo smartdns status` | Diagnóstico completo en vivo (DNS, anti-fuga, SNI 443, firewall) |
+| `sudo smartdns metrics` | Mbps en vivo, disco/RAM, origen Geo/ISP y tráfico kernel por IP |
+| `sudo smartdns monitor` | Monitor SNI en tiempo real con alias y colores (`Ctrl+C` seguro) |
+| `sudo smartdns discover` | Asistente DNS para descubrir dominios nuevos de una app Android |
+| `sudo smartdns ip add <IP> "<Alias>" 0` | Autoriza una VPS VPN permanente (`0`) o cliente por `N` días |
+| `sudo smartdns domains check <dom\|url>` | Verifica por dónde sale un dominio y prueba DNS/SNI en vivo |
+| `sudo smartdns update` | Actualiza atómicamente desde GitHub conservando licencias y listas |
+| `sudo smartdns cleanup` | Libera caché APT, `journald` y logs rotados (VPS de 10 GB) |
+| `sudo smartdns backup` | Respaldo liviano (~3 KB) de licencias, listas y configuración |
+| `sudo smartdns uninstall` | Desinstalación limpia restaurando `systemd-resolved` (SSH intacto) |
+
+---
+
+## Guías por tema ([docs/GUIA-COMPLETA.md](docs/GUIA-COMPLETA.md))
+
+- [Instalación y VPS con NAT 1:1 / DHCP](docs/GUIA-COMPLETA.md#instalacion)
+- [Conectar tus VPS de Brasil / USA y Android](docs/GUIA-COMPLETA.md#conectar-vps-vpn)
+- [Gestión de Clientes y Licencias IP (Geo/ISP y contadores)](docs/GUIA-COMPLETA.md#licencias-ip)
+- [Dominios, Categorías y Buscador](docs/GUIA-COMPLETA.md#dominios)
+- [Diagnóstico, Métricas y Monitor SNI en vivo](docs/GUIA-COMPLETA.md#diagnostico)
+- [Descubrir dominios de una app argentina nueva](docs/GUIA-COMPLETA.md#descubrir-apps)
+- [Mantenimiento, Ahorro de Disco (10 GB), Backups y Update](docs/GUIA-COMPLETA.md#mantenimiento)
+- [Limitaciones conocidas (ej. detección `TRANSPORT_VPN` / DoH)](docs/GUIA-COMPLETA.md#limitaciones)
+
+---
+
+## Utilidad incluida: habilitar acceso SSH `root` con clave
+
+Compatible con Ubuntu 22.04/24.04/26.04 y `cloud-init` (prioridad `00-joif-root.conf`, validación `sshd -t` con rollback automático):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/manuel3200/joif-smartdns/main/tools/acceso-root.sh -o acceso-root.sh && chmod +x acceso-root.sh && sudo ./acceso-root.sh
+```
+
+---
+
+## Estructura del repositorio
 
 ```text
 joif-smartdns/
 ├── install.sh                       # Instalador idempotente Ubuntu 22.04 / 24.04 / 26.04 LTS
 ├── uninstall.sh                     # Desinstalador limpio (restaura systemd-resolved, SSH intacto)
-├── menu.sh                          # Panel interactivo y CLI (/usr/local/bin/smartdns)
+├── menu.sh                          # Panel visual interactivo y CLI (/usr/local/bin/smartdns)
 ├── core/
-│   ├── common.sh                    # Rutas, validaciones IPv4/CIDR/dominios, helpers y bloqueo flock
-│   ├── domains.sh                   # Parser, deduplicación y gestión de categorías domains.d/
-│   ├── dnsmasq_gen.sh               # Generador dnsmasq con detección dinámica filter-rr y rollback
-│   ├── nginx_gen.sh                 # Generador nginx stream (443) + http (80) con allowlist y rollback
-│   ├── licenses.sh                  # CRUD de licencias IP/CIDR y lógica de vencimiento
-│   ├── firewall.sh                  # ipset swap atómico + iptables cadena JOIF_SMARTDNS (SSH seguro)
-│   ├── expire-licenses.sh           # Ejecutable horario para desactivar IPs vencidas
-│   └── diagnostics.sh               # Diagnóstico integral en vivo (DNS, anti-fuga, SNI, firewall)
+│   ├── common.sh                    # Rutas, validadores, Geo/ISP liviano, helpers y bloqueo flock
+│   ├── ui.sh                        # Interfaz compacta <=74 cols, UTF-8/ASCII y Ctrl+C seguro
+│   ├── domains.sh                   # Parser, deduplicación, categorías y buscador/probador live
+│   ├── dnsmasq_gen.sh               # Generador dnsmasq (filter-rr=AAAA,HTTPS,SVCB) con rollback
+│   ├── nginx_gen.sh                 # Generador nginx stream (443) + http (80) con allowlist/rollback
+│   ├── licenses.sh                  # CRUD de licencias IP/CIDR, origen Geo/ISP y expiración
+│   ├── firewall.sh                  # ipset con counters (migración sin cortes) + iptables JOIF_SMARTDNS
+│   ├── expire-licenses.sh           # Tarea horaria: purga vencidas y tope de tamaño de logs
+│   ├── diagnostics.sh               # Diagnóstico integral en vivo (DNS, anti-fuga, SNI, firewall)
+│   ├── metrics.sh                   # Mbps en vivo, disco/RAM, tráfico por IP y Top dominios
+│   ├── maintenance.sh               # logrotate, tope journald 80MB, limpieza 10GB y backup/restore
+│   ├── updater.sh                   # Actualizador atómico desde GitHub sin depender de .git
+│   └── monitor.sh                   # Monitor SNI formateado y asistente descubridor de apps DNS
 ├── domains.d/
 │   ├── 01-fintech-bancos.list
 │   ├── 02-gobierno-ar.list
@@ -68,97 +102,15 @@ joif-smartdns/
 │   ├── joif-smartdns-expire.service
 │   └── joif-smartdns-expire.timer
 ├── tools/
-│   └── acceso-root.sh               # Utilidad opcional para habilitar acceso SSH root con clave
+│   └── acceso-root.sh               # Utilidad para habilitar SSH root con clave (cloud-init safe)
+├── docs/
+│   └── GUIA-COMPLETA.md             # Manual operativo completo con anclas enlazadas desde el menú
 └── tests/
     └── run_tests.sh                 # Suite de pruebas automatizadas locales
 ```
 
-## Instalación en VPS Argentina (Ubuntu 22.04 / 24.04 / 26.04 LTS)
-
-```bash
-git clone https://github.com/manuel3200/joif-smartdns.git
-cd joif-smartdns
-chmod +x install.sh
-sudo ./install.sh
-```
-
-Instalación no interactiva (opcional):
-
-```bash
-sudo ./install.sh \
-  --public-ip 200.x.x.x \
-  --allow-ip 177.x.x.x \
-  --allow-alias "Nodo Brasil 01" \
-  --non-interactive
-```
-
-## Uso diario (`smartdns`)
-
-Abre el panel interactivo:
-
-```bash
-sudo smartdns
-```
-
-O usa subcomandos directos desde consola/scripts:
-
-```bash
-# Autorizar VPS de Brasil de forma permanente (0 días = permanente)
-sudo smartdns ip add 177.x.x.x "Nodo Brasil 01" 0
-
-# Autorizar un cliente temporal por 30 días
-sudo smartdns ip add 190.x.x.x "Cliente Prueba" 30
-
-# Listar licencias con estado y días restantes
-sudo smartdns ip list
-
-# Renovar / suspender / reactivar / eliminar
-sudo smartdns ip renew 190.x.x.x 30
-sudo smartdns ip suspend 190.x.x.x
-sudo smartdns ip reactivate 190.x.x.x
-sudo smartdns ip remove 190.x.x.x
-
-# Gestionar listas de dominios y recargar con validación + rollback
-sudo smartdns domains list
-sudo smartdns domains disable 03-streaming-ar
-sudo smartdns domains enable 03-streaming-ar
-sudo smartdns domains add midominio.com.ar
-sudo smartdns domains remove midominio.com.ar
-
-# Diagnóstico completo en vivo
-sudo smartdns status
-```
-
-## Utilidad opcional: habilitar acceso SSH `root` con clave
-
-Si tu VPS viene solo con usuario sin `root` (ej. `ubuntu` o `clientXXXX` con `cloud-init`), podés habilitar el acceso `root` por contraseña de forma segura (valida con `sshd -t` antes de reiniciar SSH):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/manuel3200/joif-smartdns/main/tools/acceso-root.sh -o acceso-root.sh && chmod +x acceso-root.sh && sudo ./acceso-root.sh
-```
-
-## Desinstalación limpia
-
-```bash
-sudo /opt/joif-smartdns/uninstall.sh
-# o desde el panel: sudo smartdns -> opción 6
-```
-
-Restaura `systemd-resolved` y `/etc/resolv.conf`, elimina únicamente las reglas de firewall de `joif-smartdns` y restaura `/etc/nginx/nginx.conf` original sin tocar el puerto SSH (`22/tcp`).
-
 ## Pruebas automatizadas locales
-
-Puedes ejecutar la suite completa de validación local (Linux, macOS o Windows con Git Bash):
 
 ```bash
 bash tests/run_tests.sh
 ```
-
-Verifica:
-- Finales de línea LF y sintaxis `bash -n` de todos los scripts.
-- Validadores de IPv4, CIDR (incluyendo rechazo de `0.0.0.0/0`) y dominios RFC 1123.
-- Parser de `domains.d/*.list`, deduplicación entre categorías y activar/desactivar listas.
-- Generación de `dnsmasq` con detección dinámica de `filter-rr=HTTPS,SVCB` (v2.90+ vs v2.86) y rollback ante fallo de `--test`.
-- Generación de `nginx` `stream` (443 `ssl_preread`) y `http` (80) con allowlist estricta, resolvers externos y rollback ante fallo de `nginx -t`.
-- Ciclo de vida de licencias IP, vencimiento automático por fecha, renovación anticipada y bloqueo de reactivación de vencidas.
-- Reglas de `firewall.sh` con mocks verificando swap atómico de `ipset` y que SSH (`22/tcp`) jamás se toca.
