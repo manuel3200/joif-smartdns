@@ -1,0 +1,7 @@
+# Runtime / test artifacts
+*.tmp
+*.bak
+*.log
+.DS_Store
+Thumbs.db
+tests/tmp/

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run JOIF Smart DNS IP License Expiration every hour
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=60
+Persistent=true
+Unit=joif-smartdns-expire.service
+
+[Install]
+WantedBy=timers.target

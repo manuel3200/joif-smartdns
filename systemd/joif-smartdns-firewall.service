@@ -1,0 +1,14 @@
+[Unit]
+Description=JOIF Smart DNS Firewall & IP License Whitelist (ipset + iptables)
+Wants=network-online.target
+After=network-online.target local-fs.target
+Before=dnsmasq.service nginx.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/joif-smartdns/core/firewall.sh restore
+ExecReload=/opt/joif-smartdns/core/firewall.sh apply
+
+[Install]
+WantedBy=multi-user.target

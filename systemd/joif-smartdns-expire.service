@@ -1,0 +1,7 @@
+[Unit]
+Description=JOIF Smart DNS Hourly IP License Expiration Sync
+After=joif-smartdns-firewall.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/joif-smartdns/core/expire-licenses.sh
