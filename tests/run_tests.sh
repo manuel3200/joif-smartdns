@@ -245,6 +245,7 @@ joif_save_config
 # Caso A: dnsmasq 2.90
 export JOIF_DNSMASQ_BIN="${MOCK_BIN}/dnsmasq-290"
 dnsmasq_apply "200.58.120.10" >/dev/null
+assert_line_exact "$JOIF_DNSMASQ_CONF" "interface=*" "dnsmasq incluye interface=* para desactivar --local-service de Ubuntu"
 assert_line_exact "$JOIF_DNSMASQ_CONF" "filter-rr=HTTPS,SVCB" "dnsmasq 2.90 incluye directiva activa filter-rr=HTTPS,SVCB"
 assert_contains "$JOIF_DNSMASQ_CONF" "no-resolv" "dnsmasq incluye no-resolv"
 assert_contains "$JOIF_DNSMASQ_CONF" "no-hosts" "dnsmasq incluye no-hosts"

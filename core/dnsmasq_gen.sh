@@ -97,8 +97,11 @@ dnsmasq_render_config() {
 # Total dominios interceptados: ${#domains[@]}
 # ==============================================================================
 
-# Escuchar en puerto 53 (wildcard para compatibilidad con VPS tras NAT 1:1)
+# Escuchar en puerto 53 en todas las interfaces (compatible con VPS tras NAT 1:1/DHCP)
+# 'interface=*' ademas desactiva '--local-service' por defecto de Ubuntu para aceptar
+# consultas remotas desde las IPs autorizadas en ipset/iptables (JOIF_SMARTDNS)
 port=53
+interface=*
 
 # Seguridad y limpieza basica de consultas
 domain-needed
